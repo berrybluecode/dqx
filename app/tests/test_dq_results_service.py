@@ -1385,6 +1385,49 @@ class TestByRuleRowsRuleName:
         assert groups[0].label == "a_is_null"
 
 
+class TestGroupRowPassThreshold:
+    """The per-run threshold surfaced on each breakdown row.
+
+    ``GroupRowOut.pass_threshold`` reports the (single) threshold the
+    resolver applied to a group's rows so the drilldown can show "this rule
+    was judged against N% for this run". It is None when the group's rows
+    were judged against DIFFERENT thresholds (divergent per-column overrides)
+    or when no resolver is supplied (breach evaluation off).
+    """
+
+    @staticmethod
+    def _frozen_resolver(_row):
+        # Mirror the real resolver's "frozen value wins" behaviour.
+        return _row.pass_threshold
+
+    def test_uniform_threshold_is_surfaced(self):
+        # Two per-column checks of one rule, both frozen at 90.
+        rows = [
+            make_row(check="c(a)", failed=0, total=100, columns=("a",), rule_id="rid1", pass_threshold=90),
+            make_row(check="c(b)", failed=0, total=100, columns=("b",), rule_id="rid1", pass_threshold=90),
+        ]
+        groups = _by_rule_rows(rows, self._frozen_resolver)
+        assert len(groups) == 1
+        assert groups[0].pass_threshold == 90
+
+    def test_divergent_thresholds_render_mixed(self):
+        # Same rule, one column judged at 90 and another at 70 -> no single
+        # value applies, so the row reports None (UI renders "Mixed").
+        rows = [
+            make_row(check="c(a)", failed=0, total=100, columns=("a",), rule_id="rid1", pass_threshold=90),
+            make_row(check="c(b)", failed=0, total=100, columns=("b",), rule_id="rid1", pass_threshold=70),
+        ]
+        groups = _by_rule_rows(rows, self._frozen_resolver)
+        assert len(groups) == 1
+        assert groups[0].pass_threshold is None
+
+    def test_no_resolver_leaves_threshold_none(self):
+        # Breach evaluation off (no resolver) -> nothing to report.
+        rows = [make_row(check="c1", failed=0, total=100, rule_id="rid1", pass_threshold=90)]
+        groups = _by_rule_rows(rows)
+        assert groups[0].pass_threshold is None
+
+
 class TestBreach:
     """Per-check breach evaluation + criticality-aware group/run/trend roll-ups.
 
@@ -1527,36 +1570,43 @@ class TestBreach:
         assert out.by_rule[0].breach_criticality is None
 
 
-class TestLiveThresholdResolution:
-    """Breach evaluation uses the live threshold precedence chain (per-column ->
-    per-rule -> registry -> admin) so edits to applied-rule thresholds are
-    reflected in Results immediately after save. The per-run frozen
-    ``pass_threshold`` stamped at materialization is kept for audit but no
-    longer overrides the live configuration.
+class TestPerRunThresholdResolution:
+    """Breach evaluation prefers the per-run frozen ``pass_threshold`` (the
+    effective value resolved through per-column -> per-rule -> registry ->
+    admin and stamped into ``checks_json`` at materialization) so each run is
+    judged by the threshold that was in force when it executed — a later
+    threshold edit does not retroactively re-verdict historical runs. The live
+    precedence chain is the fallback for runs that carry no stamp.
     """
 
-    def test_live_admin_default_used_even_when_run_stamped_differently(self):
-        # Row stamped at 90, but live admin default is 50 — live wins.
+    def test_frozen_threshold_wins_over_live_admin_default(self):
+        # Row stamped at 90, live admin default is 50 — the run keeps its 90.
         resolve = _build_threshold_resolver(
             admin_default=50,
             registry_defaults={},
         )
-        # 15 failed / 100 -> 85% pass. Breaches under 90 (stamp) but NOT under 50 (live).
+        # 15 failed / 100 -> 85% pass. Breaches under the frozen 90.
         stamped = make_row(check="c1", failed=15, total=100, error_count=15, criticality="error", pass_threshold=90)
-        assert resolve(stamped) == 50
-        assert _breach_criticality(stamped, resolve(stamped)) is None
-
-    def test_live_admin_default_breaches_when_pass_rate_below(self):
-        resolve = _build_threshold_resolver(
-            admin_default=90,
-            registry_defaults={},
-        )
-        stamped = make_row(check="c1", failed=15, total=100, error_count=15, criticality="error", pass_threshold=80)
         assert resolve(stamped) == 90
         assert _breach_criticality(stamped, resolve(stamped)) == "error"
 
-    def test_live_overrides_win_over_stamped_row_threshold(self):
-        # Live overrides (per-column 30, per-rule 40) beat a stamped 90.
+    def test_raising_live_threshold_does_not_re_verdict_historical_run(self):
+        # The user's scenario: a run executed under 70% with a 72% pass rate
+        # must STAY green even after the live threshold is raised to 100%.
+        resolve = _build_threshold_resolver(
+            admin_default=100,
+            registry_defaults={},
+        )
+        # 28 failed / 100 -> 72% pass; frozen 70 -> no breach despite live 100.
+        historical = make_row(
+            check="c1", failed=28, total=100, error_count=28, criticality="error", pass_threshold=70
+        )
+        assert resolve(historical) == 70
+        assert _breach_criticality(historical, resolve(historical)) is None
+
+    def test_frozen_threshold_wins_over_live_overrides(self):
+        # Live overrides (per-column 30, per-rule 40) are ignored when the run
+        # carries a frozen 90 — the run is judged by its own run-time value.
         resolve = _build_threshold_resolver(
             admin_default=50,
             registry_defaults={"rule-1": 60},
@@ -1573,7 +1623,8 @@ class TestLiveThresholdResolution:
             columns=("amount",),
             pass_threshold=90,
         )
-        assert resolve(stamped) == 30
+        assert resolve(stamped) == 90
+        # 20% pass < frozen 90 -> breach.
         assert _breach_criticality(stamped, resolve(stamped)) == "error"
 
     def test_unstamped_row_uses_live_chain(self):

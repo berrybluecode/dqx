@@ -906,6 +906,153 @@ export interface ContractSchemaRulesOut {
   rules: ContractSchemaRulesOutRulesItem[];
 }
 
+export interface CoveragePoliciesIn {
+  policies: CoveragePolicy[];
+}
+
+export interface CoveragePoliciesOut {
+  policies: CoveragePolicy[];
+}
+
+/**
+ * 'advisory' (surface only) or 'blocking' (gate binding approval until satisfied/waived)
+ */
+export type CoveragePolicyEnforcement = typeof CoveragePolicyEnforcement[keyof typeof CoveragePolicyEnforcement];
+
+
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export const CoveragePolicyEnforcement = {
+  advisory: 'advisory',
+  blocking: 'blocking',
+} as const;
+
+/**
+ * Which columns the policy applies to
+ */
+export type CoveragePolicyColumnType = typeof CoveragePolicyColumnType[keyof typeof CoveragePolicyColumnType];
+
+
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export const CoveragePolicyColumnType = {
+  timestamp: 'timestamp',
+  timestamp_ntz: 'timestamp_ntz',
+  date: 'date',
+  decimal: 'decimal',
+  numeric: 'numeric',
+  boolean: 'boolean',
+  string: 'string',
+  any: 'any',
+} as const;
+
+/**
+ * One admin-managed coverage requirement (see module docstring).
+ */
+export interface CoveragePolicy {
+  /** Stable id (uuid hex); generated server-side when blank */
+  policy_id?: string;
+  /** Human-readable policy name */
+  name: string;
+  /** Optional free-text explanation */
+  description?: string;
+  /** Disabled policies are neither surfaced nor enforced */
+  enabled?: boolean;
+  /** 'advisory' (surface only) or 'blocking' (gate binding approval until satisfied/waived) */
+  enforcement?: CoveragePolicyEnforcement;
+  /** DEPRECATED single-scope form, kept for back-compat. Prefer ``table_scopes``. When ``table_scopes`` is empty this one value is used as the sole scope. A '*' glob matches any run of characters (e.g. 'main.finance.*'); a wildcard-free value is a dot-bounded prefix, so 'samples' covers every table in the 'samples' catalog and 'main.finance' covers that schema. */
+  table_scope?: string;
+  /** The scopes the policy applies to; a table matches when it matches ANY entry (OR). Each entry has the same glob/dot-bounded-prefix semantics as ``table_scope``. When empty, ``table_scope`` is used as the single scope. */
+  table_scopes?: string[];
+  /** Which columns the policy applies to */
+  column_type: CoveragePolicyColumnType;
+  /** When true, only columns that are part of the table's PRIMARY KEY are in scope. */
+  primary_key_only?: boolean;
+  /** DEPRECATED single-rule form, kept for back-compat. Prefer ``required_checks``. When ``required_checks`` is empty this one value is used as the sole requirement. Identifies the rule a matching column must carry: a registry rule id (``dq_rules.rule_id``) — the column must have that authored rule applied — or a raw DQX check-function name (e.g. 'is_not_null') matched against the checks materialized on the table. */
+  required_check?: string;
+  /** The rules EVERY matching column must carry (all of them). Each entry is a registry rule id (``dq_rules.rule_id``) or a raw DQX check-function name, same semantics as ``required_check``. When empty, ``required_check`` is used as the single requirement. */
+  required_checks?: string[];
+}
+
+export type CoveragePolicyEvaluationEnforcement = typeof CoveragePolicyEvaluationEnforcement[keyof typeof CoveragePolicyEvaluationEnforcement];
+
+
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export const CoveragePolicyEvaluationEnforcement = {
+  advisory: 'advisory',
+  blocking: 'blocking',
+} as const;
+
+export type CoveragePolicyEvaluationColumnType = typeof CoveragePolicyEvaluationColumnType[keyof typeof CoveragePolicyEvaluationColumnType];
+
+
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export const CoveragePolicyEvaluationColumnType = {
+  timestamp: 'timestamp',
+  timestamp_ntz: 'timestamp_ntz',
+  date: 'date',
+  decimal: 'decimal',
+  numeric: 'numeric',
+  boolean: 'boolean',
+  string: 'string',
+  any: 'any',
+} as const;
+
+export type CoveragePolicyEvaluationWaiverReason = string | null;
+
+/**
+ * Result of evaluating one policy against one table's live state.
+ */
+export interface CoveragePolicyEvaluation {
+  policy_id: string;
+  name: string;
+  enforcement: CoveragePolicyEvaluationEnforcement;
+  required_check: string;
+  required_checks?: string[];
+  column_type: CoveragePolicyEvaluationColumnType;
+  primary_key_only: boolean;
+  /** Columns the policy applies to */
+  matched_columns?: string[];
+  /** Matched columns that carry ALL required checks */
+  covered_columns?: string[];
+  /** Matched columns missing at least one required check */
+  missing_columns?: string[];
+  /** True when every matched column carries every required check */
+  satisfied: boolean;
+  /** True when an admin waiver suppresses this policy for the binding */
+  waived?: boolean;
+  waiver_reason?: CoveragePolicyEvaluationWaiverReason;
+}
+
+/**
+ * Full per-binding compliance report across all enabled policies.
+ */
+export interface CoverageReport {
+  binding_id: string;
+  table_fqn: string;
+  evaluations?: CoveragePolicyEvaluation[];
+  blocking_unsatisfied?: string[];
+  compliant?: boolean;
+  primary_key_unknown?: boolean;
+}
+
+export type CoverageWaiverGrantedBy = string | null;
+
+export type CoverageWaiverGrantedAt = string | null;
+
+/**
+ * An admin-granted exemption of one policy for one monitored-table binding.
+ */
+export interface CoverageWaiver {
+  binding_id: string;
+  policy_id: string;
+  reason?: string;
+  granted_by?: CoverageWaiverGrantedBy;
+  granted_at?: CoverageWaiverGrantedAt;
+}
+
+export interface CoverageWaiversOut {
+  waivers: CoverageWaiver[];
+}
+
 export type CreateDataProductInDescription = string | null;
 
 /**
@@ -1850,6 +1997,12 @@ export interface GovernedTagsOut {
   tags?: GovernedTagOut[];
 }
 
+export interface GrantWaiverIn {
+  binding_id: string;
+  policy_id: string;
+  reason?: string;
+}
+
 export interface GrantWarehouseAccessIn {
   warehouse_id: string;
 }
@@ -1884,6 +2037,8 @@ export type GroupRowOutTotalTests = number | null;
 
 export type GroupRowOutBreachCriticality = string | null;
 
+export type GroupRowOutPassThreshold = number | null;
+
 /**
  * One breakdown row (by dimension / severity / rule / column / table).
 
@@ -1898,6 +2053,15 @@ by_rule axis only (additive — the frozen registry rule id the group
 is keyed on, so the UI can facet-filter by rule IDENTITY across
 renames; None for legacy/untagged name-keyed groups and on every
 other axis).
+
+*pass_threshold* is the pass-rate threshold (%) that was actually
+applied to THIS run's rows when verdicting the breach — the value
+frozen into the run's ``checks_json`` at materialization time, falling
+back to the live resolver chain for legacy runs. It lets the drilldown
+show "the threshold this rule was judged against for this run". None
+when the group's rows were judged against DIFFERENT thresholds (e.g. a
+rule with divergent per-column overrides — the UI renders "Mixed") or
+when breach evaluation is off (no resolver supplied).
  */
 export interface GroupRowOut {
   label?: GroupRowOutLabel;
@@ -1910,6 +2074,7 @@ export interface GroupRowOut {
   total_tests?: GroupRowOutTotalTests;
   breached?: boolean;
   breach_criticality?: GroupRowOutBreachCriticality;
+  pass_threshold?: GroupRowOutPassThreshold;
 }
 
 export interface HTTPValidationError {
@@ -5265,6 +5430,8 @@ q: string;
  */
 limit?: number;
 };
+
+export type RevokeCoverageWaiver200 = {[key: string]: boolean};
 
 /**
  * @summary Version
@@ -28041,3 +28208,653 @@ export function useListMarketplacePacksSuspense<TData = Awaited<ReturnType<typeo
 
   return query;
 }
+
+
+
+
+
+/**
+ * Return all coverage policies.
+
+Available to any authenticated user — the table page + compliance report
+need the policy list to show which coverage is expected. Only admins can
+change it (the PUT below).
+ * @summary Get Coverage Policies
+ */
+export const getCoveragePolicies = (
+     options?: AxiosRequestConfig
+ ): Promise<AxiosResponse<CoveragePoliciesOut>> => {
+    
+    
+    return axios.default.get(
+      `/api/v1/coverage/policies`,options
+    );
+  }
+
+
+
+
+export const getGetCoveragePoliciesQueryKey = () => {
+    return [
+    `/api/v1/coverage/policies`
+    ] as const;
+    }
+
+    
+export const getGetCoveragePoliciesQueryOptions = <TData = Awaited<ReturnType<typeof getCoveragePolicies>>, TError = AxiosError<HTTPValidationError>>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData>>, axios?: AxiosRequestConfig}
+) => {
+
+const {query: queryOptions, axios: axiosOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCoveragePoliciesQueryKey();
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCoveragePolicies>>> = ({ signal }) => getCoveragePolicies({ signal, ...axiosOptions });
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetCoveragePoliciesQueryResult = NonNullable<Awaited<ReturnType<typeof getCoveragePolicies>>>
+export type GetCoveragePoliciesQueryError = AxiosError<HTTPValidationError>
+
+
+export function useGetCoveragePolicies<TData = Awaited<ReturnType<typeof getCoveragePolicies>>, TError = AxiosError<HTTPValidationError>>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getCoveragePolicies>>,
+          TError,
+          Awaited<ReturnType<typeof getCoveragePolicies>>
+        > , 'initialData'
+      >, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoveragePolicies<TData = Awaited<ReturnType<typeof getCoveragePolicies>>, TError = AxiosError<HTTPValidationError>>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getCoveragePolicies>>,
+          TError,
+          Awaited<ReturnType<typeof getCoveragePolicies>>
+        > , 'initialData'
+      >, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoveragePolicies<TData = Awaited<ReturnType<typeof getCoveragePolicies>>, TError = AxiosError<HTTPValidationError>>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Get Coverage Policies
+ */
+
+export function useGetCoveragePolicies<TData = Awaited<ReturnType<typeof getCoveragePolicies>>, TError = AxiosError<HTTPValidationError>>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetCoveragePoliciesQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+export const getGetCoveragePoliciesSuspenseQueryOptions = <TData = Awaited<ReturnType<typeof getCoveragePolicies>>, TError = AxiosError<HTTPValidationError>>( options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData>>, axios?: AxiosRequestConfig}
+) => {
+
+const {query: queryOptions, axios: axiosOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCoveragePoliciesQueryKey();
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCoveragePolicies>>> = ({ signal }) => getCoveragePolicies({ signal, ...axiosOptions });
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetCoveragePoliciesSuspenseQueryResult = NonNullable<Awaited<ReturnType<typeof getCoveragePolicies>>>
+export type GetCoveragePoliciesSuspenseQueryError = AxiosError<HTTPValidationError>
+
+
+export function useGetCoveragePoliciesSuspense<TData = Awaited<ReturnType<typeof getCoveragePolicies>>, TError = AxiosError<HTTPValidationError>>(
+  options: { query:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoveragePoliciesSuspense<TData = Awaited<ReturnType<typeof getCoveragePolicies>>, TError = AxiosError<HTTPValidationError>>(
+  options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoveragePoliciesSuspense<TData = Awaited<ReturnType<typeof getCoveragePolicies>>, TError = AxiosError<HTTPValidationError>>(
+  options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Get Coverage Policies
+ */
+
+export function useGetCoveragePoliciesSuspense<TData = Awaited<ReturnType<typeof getCoveragePolicies>>, TError = AxiosError<HTTPValidationError>>(
+  options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoveragePolicies>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient 
+ ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetCoveragePoliciesSuspenseQueryOptions(options)
+
+  const query = useSuspenseQuery(queryOptions, queryClient) as  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * Replace the full set of coverage policies (admin only).
+
+New policies (blank ``policy_id``) get a server-minted id. Dropping a policy
+also prunes any waivers that referenced it. 400 on a validation failure
+(blank name/scope/required check, or an invalid enforcement/column type).
+ * @summary Save Coverage Policies
+ */
+export const saveCoveragePolicies = (
+    coveragePoliciesIn: CoveragePoliciesIn, options?: AxiosRequestConfig
+ ): Promise<AxiosResponse<CoveragePoliciesOut>> => {
+    
+    
+    return axios.default.put(
+      `/api/v1/coverage/policies`,
+      coveragePoliciesIn,options
+    );
+  }
+
+
+
+export const getSaveCoveragePoliciesMutationOptions = <TError = AxiosError<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof saveCoveragePolicies>>, TError,{data: CoveragePoliciesIn}, TContext>, axios?: AxiosRequestConfig}
+): UseMutationOptions<Awaited<ReturnType<typeof saveCoveragePolicies>>, TError,{data: CoveragePoliciesIn}, TContext> => {
+
+const mutationKey = ['saveCoveragePolicies'];
+const {mutation: mutationOptions, axios: axiosOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, axios: undefined};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof saveCoveragePolicies>>, {data: CoveragePoliciesIn}> = (props) => {
+          const {data} = props ?? {};
+
+          return  saveCoveragePolicies(data,axiosOptions)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SaveCoveragePoliciesMutationResult = NonNullable<Awaited<ReturnType<typeof saveCoveragePolicies>>>
+    export type SaveCoveragePoliciesMutationBody = CoveragePoliciesIn
+    export type SaveCoveragePoliciesMutationError = AxiosError<HTTPValidationError>
+
+    /**
+ * @summary Save Coverage Policies
+ */
+export const useSaveCoveragePolicies = <TError = AxiosError<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof saveCoveragePolicies>>, TError,{data: CoveragePoliciesIn}, TContext>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof saveCoveragePolicies>>,
+        TError,
+        {data: CoveragePoliciesIn},
+        TContext
+      > => {
+
+      const mutationOptions = getSaveCoveragePoliciesMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * Evaluate every enabled, in-scope policy against the binding's table.
+
+Read-only; available to any authenticated user. Surfaces missing coverage
+(advisory + blocking alike) and flags which blocking policies would refuse
+an approval.
+ * @summary Get Coverage Report
+ */
+export const getCoverageReport = (
+    bindingId: string, options?: AxiosRequestConfig
+ ): Promise<AxiosResponse<CoverageReport>> => {
+    
+    
+    return axios.default.get(
+      `/api/v1/coverage/report/${bindingId}`,options
+    );
+  }
+
+
+
+
+export const getGetCoverageReportQueryKey = (bindingId?: string,) => {
+    return [
+    `/api/v1/coverage/report/${bindingId}`
+    ] as const;
+    }
+
+    
+export const getGetCoverageReportQueryOptions = <TData = Awaited<ReturnType<typeof getCoverageReport>>, TError = AxiosError<HTTPValidationError>>(bindingId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData>>, axios?: AxiosRequestConfig}
+) => {
+
+const {query: queryOptions, axios: axiosOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCoverageReportQueryKey(bindingId);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCoverageReport>>> = ({ signal }) => getCoverageReport(bindingId, { signal, ...axiosOptions });
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(bindingId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetCoverageReportQueryResult = NonNullable<Awaited<ReturnType<typeof getCoverageReport>>>
+export type GetCoverageReportQueryError = AxiosError<HTTPValidationError>
+
+
+export function useGetCoverageReport<TData = Awaited<ReturnType<typeof getCoverageReport>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getCoverageReport>>,
+          TError,
+          Awaited<ReturnType<typeof getCoverageReport>>
+        > , 'initialData'
+      >, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoverageReport<TData = Awaited<ReturnType<typeof getCoverageReport>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getCoverageReport>>,
+          TError,
+          Awaited<ReturnType<typeof getCoverageReport>>
+        > , 'initialData'
+      >, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoverageReport<TData = Awaited<ReturnType<typeof getCoverageReport>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Get Coverage Report
+ */
+
+export function useGetCoverageReport<TData = Awaited<ReturnType<typeof getCoverageReport>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetCoverageReportQueryOptions(bindingId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+export const getGetCoverageReportSuspenseQueryOptions = <TData = Awaited<ReturnType<typeof getCoverageReport>>, TError = AxiosError<HTTPValidationError>>(bindingId: string, options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData>>, axios?: AxiosRequestConfig}
+) => {
+
+const {query: queryOptions, axios: axiosOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCoverageReportQueryKey(bindingId);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCoverageReport>>> = ({ signal }) => getCoverageReport(bindingId, { signal, ...axiosOptions });
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetCoverageReportSuspenseQueryResult = NonNullable<Awaited<ReturnType<typeof getCoverageReport>>>
+export type GetCoverageReportSuspenseQueryError = AxiosError<HTTPValidationError>
+
+
+export function useGetCoverageReportSuspense<TData = Awaited<ReturnType<typeof getCoverageReport>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options: { query:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoverageReportSuspense<TData = Awaited<ReturnType<typeof getCoverageReport>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoverageReportSuspense<TData = Awaited<ReturnType<typeof getCoverageReport>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Get Coverage Report
+ */
+
+export function useGetCoverageReportSuspense<TData = Awaited<ReturnType<typeof getCoverageReport>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageReport>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient 
+ ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetCoverageReportSuspenseQueryOptions(bindingId,options)
+
+  const query = useSuspenseQuery(queryOptions, queryClient) as  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * Return the coverage waivers granted for a binding (any authenticated user).
+ * @summary Get Coverage Waivers
+ */
+export const getCoverageWaivers = (
+    bindingId: string, options?: AxiosRequestConfig
+ ): Promise<AxiosResponse<CoverageWaiversOut>> => {
+    
+    
+    return axios.default.get(
+      `/api/v1/coverage/waivers/${bindingId}`,options
+    );
+  }
+
+
+
+
+export const getGetCoverageWaiversQueryKey = (bindingId?: string,) => {
+    return [
+    `/api/v1/coverage/waivers/${bindingId}`
+    ] as const;
+    }
+
+    
+export const getGetCoverageWaiversQueryOptions = <TData = Awaited<ReturnType<typeof getCoverageWaivers>>, TError = AxiosError<HTTPValidationError>>(bindingId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData>>, axios?: AxiosRequestConfig}
+) => {
+
+const {query: queryOptions, axios: axiosOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCoverageWaiversQueryKey(bindingId);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCoverageWaivers>>> = ({ signal }) => getCoverageWaivers(bindingId, { signal, ...axiosOptions });
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(bindingId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetCoverageWaiversQueryResult = NonNullable<Awaited<ReturnType<typeof getCoverageWaivers>>>
+export type GetCoverageWaiversQueryError = AxiosError<HTTPValidationError>
+
+
+export function useGetCoverageWaivers<TData = Awaited<ReturnType<typeof getCoverageWaivers>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getCoverageWaivers>>,
+          TError,
+          Awaited<ReturnType<typeof getCoverageWaivers>>
+        > , 'initialData'
+      >, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoverageWaivers<TData = Awaited<ReturnType<typeof getCoverageWaivers>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getCoverageWaivers>>,
+          TError,
+          Awaited<ReturnType<typeof getCoverageWaivers>>
+        > , 'initialData'
+      >, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoverageWaivers<TData = Awaited<ReturnType<typeof getCoverageWaivers>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Get Coverage Waivers
+ */
+
+export function useGetCoverageWaivers<TData = Awaited<ReturnType<typeof getCoverageWaivers>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetCoverageWaiversQueryOptions(bindingId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+export const getGetCoverageWaiversSuspenseQueryOptions = <TData = Awaited<ReturnType<typeof getCoverageWaivers>>, TError = AxiosError<HTTPValidationError>>(bindingId: string, options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData>>, axios?: AxiosRequestConfig}
+) => {
+
+const {query: queryOptions, axios: axiosOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCoverageWaiversQueryKey(bindingId);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCoverageWaivers>>> = ({ signal }) => getCoverageWaivers(bindingId, { signal, ...axiosOptions });
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetCoverageWaiversSuspenseQueryResult = NonNullable<Awaited<ReturnType<typeof getCoverageWaivers>>>
+export type GetCoverageWaiversSuspenseQueryError = AxiosError<HTTPValidationError>
+
+
+export function useGetCoverageWaiversSuspense<TData = Awaited<ReturnType<typeof getCoverageWaivers>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options: { query:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoverageWaiversSuspense<TData = Awaited<ReturnType<typeof getCoverageWaivers>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCoverageWaiversSuspense<TData = Awaited<ReturnType<typeof getCoverageWaivers>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient
+  ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Get Coverage Waivers
+ */
+
+export function useGetCoverageWaiversSuspense<TData = Awaited<ReturnType<typeof getCoverageWaivers>>, TError = AxiosError<HTTPValidationError>>(
+ bindingId: string, options?: { query?:Partial<UseSuspenseQueryOptions<Awaited<ReturnType<typeof getCoverageWaivers>>, TError, TData>>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient 
+ ):  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetCoverageWaiversSuspenseQueryOptions(bindingId,options)
+
+  const query = useSuspenseQuery(queryOptions, queryClient) as  UseSuspenseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * Grant (or update) a waiver of one policy for one binding (admin only).
+
+A waiver suppresses that policy's blocking enforcement for the binding, so
+the binding can be approved despite unmet coverage. 404 when the policy id
+is unknown.
+ * @summary Grant Coverage Waiver
+ */
+export const grantCoverageWaiver = (
+    grantWaiverIn: GrantWaiverIn, options?: AxiosRequestConfig
+ ): Promise<AxiosResponse<CoverageWaiver>> => {
+    
+    
+    return axios.default.post(
+      `/api/v1/coverage/waivers`,
+      grantWaiverIn,options
+    );
+  }
+
+
+
+export const getGrantCoverageWaiverMutationOptions = <TError = AxiosError<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof grantCoverageWaiver>>, TError,{data: GrantWaiverIn}, TContext>, axios?: AxiosRequestConfig}
+): UseMutationOptions<Awaited<ReturnType<typeof grantCoverageWaiver>>, TError,{data: GrantWaiverIn}, TContext> => {
+
+const mutationKey = ['grantCoverageWaiver'];
+const {mutation: mutationOptions, axios: axiosOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, axios: undefined};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof grantCoverageWaiver>>, {data: GrantWaiverIn}> = (props) => {
+          const {data} = props ?? {};
+
+          return  grantCoverageWaiver(data,axiosOptions)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type GrantCoverageWaiverMutationResult = NonNullable<Awaited<ReturnType<typeof grantCoverageWaiver>>>
+    export type GrantCoverageWaiverMutationBody = GrantWaiverIn
+    export type GrantCoverageWaiverMutationError = AxiosError<HTTPValidationError>
+
+    /**
+ * @summary Grant Coverage Waiver
+ */
+export const useGrantCoverageWaiver = <TError = AxiosError<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof grantCoverageWaiver>>, TError,{data: GrantWaiverIn}, TContext>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof grantCoverageWaiver>>,
+        TError,
+        {data: GrantWaiverIn},
+        TContext
+      > => {
+
+      const mutationOptions = getGrantCoverageWaiverMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * Revoke a waiver (admin only). Returns ``{"revoked": bool}``.
+ * @summary Revoke Coverage Waiver
+ */
+export const revokeCoverageWaiver = (
+    bindingId: string,
+    policyId: string, options?: AxiosRequestConfig
+ ): Promise<AxiosResponse<RevokeCoverageWaiver200>> => {
+    
+    
+    return axios.default.delete(
+      `/api/v1/coverage/waivers/${bindingId}/${policyId}`,options
+    );
+  }
+
+
+
+export const getRevokeCoverageWaiverMutationOptions = <TError = AxiosError<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof revokeCoverageWaiver>>, TError,{bindingId: string;policyId: string}, TContext>, axios?: AxiosRequestConfig}
+): UseMutationOptions<Awaited<ReturnType<typeof revokeCoverageWaiver>>, TError,{bindingId: string;policyId: string}, TContext> => {
+
+const mutationKey = ['revokeCoverageWaiver'];
+const {mutation: mutationOptions, axios: axiosOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, axios: undefined};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof revokeCoverageWaiver>>, {bindingId: string;policyId: string}> = (props) => {
+          const {bindingId,policyId} = props ?? {};
+
+          return  revokeCoverageWaiver(bindingId,policyId,axiosOptions)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RevokeCoverageWaiverMutationResult = NonNullable<Awaited<ReturnType<typeof revokeCoverageWaiver>>>
+    
+    export type RevokeCoverageWaiverMutationError = AxiosError<HTTPValidationError>
+
+    /**
+ * @summary Revoke Coverage Waiver
+ */
+export const useRevokeCoverageWaiver = <TError = AxiosError<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof revokeCoverageWaiver>>, TError,{bindingId: string;policyId: string}, TContext>, axios?: AxiosRequestConfig}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof revokeCoverageWaiver>>,
+        TError,
+        {bindingId: string;policyId: string},
+        TContext
+      > => {
+
+      const mutationOptions = getRevokeCoverageWaiverMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }

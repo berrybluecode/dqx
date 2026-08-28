@@ -9,6 +9,7 @@ from databricks_labs_dqx_app.backend.services import owner_display_name_service
 from databricks_labs_dqx_app.backend.services.owner_display_name_service import (
     resolve_emails_to_display_names,
     resolve_owner_display_name,
+    resolve_owners_cached,
 )
 
 # ---------------------------------------------------------------------------
@@ -106,3 +107,45 @@ class TestResolveOwnerDisplayName:
         # Second call must hit the cache, not SCIM again (the iterator is spent).
         assert resolve_owner_display_name("alice@example.com", sp_ws) == "Alice Smith"
         assert sp_ws.users.list.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# resolve_owners_cached (batched read-time enrichment)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveOwnersCached:
+    def setup_method(self) -> None:
+        owner_display_name_service._resolve_cache.clear()
+
+    def test_batches_misses_into_one_scim_call(self) -> None:
+        sp_ws = _make_sp_ws(
+            [
+                _make_user("alice@example.com", "Alice Smith"),
+                _make_user("bob@example.com", "Bob Jones"),
+            ]
+        )
+        result = resolve_owners_cached(["alice@example.com", "bob@example.com"], sp_ws)
+        assert result == {"alice@example.com": "Alice Smith", "bob@example.com": "Bob Jones"}
+        # A single batched SCIM call covers both misses.
+        assert sp_ws.users.list.call_count == 1
+
+    def test_dedupes_and_omits_unresolvable(self) -> None:
+        sp_ws = _make_sp_ws([_make_user("alice@example.com", "Alice Smith")])
+        result = resolve_owners_cached(
+            ["alice@example.com", "alice@example.com", "data-stewards"], sp_ws
+        )
+        assert result == {"alice@example.com": "Alice Smith"}
+        assert "data-stewards" not in result
+
+    def test_serves_from_cache_without_rehitting_scim(self) -> None:
+        sp_ws = _make_sp_ws([_make_user("alice@example.com", "Alice Smith")])
+        assert resolve_owners_cached(["alice@example.com"], sp_ws) == {"alice@example.com": "Alice Smith"}
+        # Second call is served from the TTL cache; the spent iterator is untouched.
+        assert resolve_owners_cached(["alice@example.com"], sp_ws) == {"alice@example.com": "Alice Smith"}
+        assert sp_ws.users.list.call_count == 1
+
+    def test_empty_or_no_client_returns_empty(self) -> None:
+        sp_ws = _make_sp_ws([])
+        assert resolve_owners_cached([], sp_ws) == {}
+        assert resolve_owners_cached(["alice@example.com"], None) == {}

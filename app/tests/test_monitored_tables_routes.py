@@ -113,6 +113,7 @@ def _submit_mt_extra() -> dict:
         "perms": MagicMock(),
         "role": UserRole.RULE_AUTHOR,
         "principal_ids": frozenset(),
+        "coverage_svc": MagicMock(),
     }
 
 
@@ -1212,7 +1213,12 @@ class TestApproveMonitoredTable:
         version_svc = MagicMock()
         version_svc.freeze_new_version.return_value = 1
         result = approve_monitored_table(
-            "b1", monitored_tables_svc=svc, rules_catalog=rules_catalog, version_svc=version_svc, obo_ws=_mock_obo_ws()
+            "b1",
+            monitored_tables_svc=svc,
+            rules_catalog=rules_catalog,
+            version_svc=version_svc,
+            obo_ws=_mock_obo_ws(),
+            coverage_svc=MagicMock(),
         )
         assert result.table.status == "approved"
         assert result.affected_check_count == 2
@@ -1231,7 +1237,12 @@ class TestApproveMonitoredTable:
         version_svc = MagicMock()
         version_svc.freeze_new_version.return_value = 2  # 1 -> 2 bump
         result = approve_monitored_table(
-            "b1", monitored_tables_svc=svc, rules_catalog=MagicMock(), version_svc=version_svc, obo_ws=_mock_obo_ws()
+            "b1",
+            monitored_tables_svc=svc,
+            rules_catalog=MagicMock(),
+            version_svc=version_svc,
+            obo_ws=_mock_obo_ws(),
+            coverage_svc=MagicMock(),
         )
         version_svc.freeze_new_version.assert_called_once_with("b1", "alice@x")
         assert result.new_version == 2
@@ -1247,6 +1258,7 @@ class TestApproveMonitoredTable:
                 rules_catalog=MagicMock(),
                 version_svc=version_svc,
                 obo_ws=_mock_obo_ws(),
+                coverage_svc=MagicMock(),
             )
         assert excinfo.value.status_code == 404
         svc.set_status.assert_not_called()
@@ -1264,6 +1276,7 @@ class TestApproveMonitoredTable:
                 rules_catalog=rules_catalog,
                 version_svc=version_svc,
                 obo_ws=_mock_obo_ws(),
+                coverage_svc=MagicMock(),
             )
         assert excinfo.value.status_code == 409
         # Neither the checks, the binding's own status, nor the version should be touched.

@@ -29,6 +29,8 @@ function outcome(partial: Partial<SchemaOutcome> & Pick<SchemaOutcome, "contract
     pending: 0,
     needsMapping: 0,
     failed: 0,
+    submitted: 0,
+    submitBlocked: 0,
     errors: [],
     ...partial,
   };
@@ -218,8 +220,37 @@ describe("aggregateByContract", () => {
     ]);
 
     expect(row.attentionTables).toEqual([
-      { fqn: "main.dq.pending_tbl", bindingId: "b1", pending: 2, needsMapping: 0 },
-      { fqn: "main.dq.manual_tbl", bindingId: "b2", pending: 0, needsMapping: 1 },
+      { fqn: "main.dq.pending_tbl", bindingId: "b1", pending: 2, needsMapping: 0, needsSubmit: 0 },
+      { fqn: "main.dq.manual_tbl", bindingId: "b2", pending: 0, needsMapping: 1, needsSubmit: 0 },
+    ]);
+  });
+
+  test("sums submit counters and flags submit-blocked tables for attention", () => {
+    const [row] = aggregateByContract([
+      // Auto-submitted for review — nothing to follow up on.
+      outcome({
+        contractId: "c1",
+        filename: "f.yaml",
+        tableFqn: "main.dq.submitted_tbl",
+        bindingId: "b1",
+        applied: 2,
+        submitted: 1,
+      }),
+      // Had checks applied but couldn't be auto-submitted → needs manual submit.
+      outcome({
+        contractId: "c1",
+        filename: "f.yaml",
+        tableFqn: "main.dq.blocked_tbl",
+        bindingId: "b2",
+        applied: 1,
+        submitBlocked: 1,
+      }),
+    ]);
+
+    expect(row.submitted).toBe(1);
+    expect(row.submitBlocked).toBe(1);
+    expect(row.attentionTables).toEqual([
+      { fqn: "main.dq.blocked_tbl", bindingId: "b2", pending: 0, needsMapping: 0, needsSubmit: 1 },
     ]);
   });
 });

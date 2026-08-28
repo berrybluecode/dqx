@@ -1032,6 +1032,51 @@ class AppSettingsService:
                 return {"kind": cls.JOBS_COMPUTE_EXISTING_CLUSTER, "cluster_id": cluster_id.strip()}
         return {"kind": cls.JOBS_COMPUTE_SERVERLESS}
 
+    # ------------------------------------------------------------------
+    # Coverage policies — admin-managed, rule-level column-coverage
+    # requirements (see ``backend.coverage_models``). Stored as a JSON array
+    # under ``coverage_policies_v1``; waivers (per binding + policy) under
+    # ``coverage_waivers_v1``. Both mirror the ``run_review_statuses`` pattern:
+    # defensive reads that degrade to an empty list rather than propagating,
+    # and a full-list replace on save.
+    # ------------------------------------------------------------------
+
+    _COVERAGE_POLICIES_KEY = "coverage_policies_v1"
+    _COVERAGE_WAIVERS_KEY = "coverage_waivers_v1"
+
+    def get_coverage_policies_raw(self) -> list[dict]:
+        """Return the stored coverage-policy list as raw dicts (defensive)."""
+        return self._get_json_list(self._COVERAGE_POLICIES_KEY)
+
+    def save_coverage_policies_raw(self, policies: list[dict], *, user_email: str | None = None) -> None:
+        """Replace the full coverage-policy list."""
+        self.save_setting(self._COVERAGE_POLICIES_KEY, json.dumps(policies), user_email=user_email)
+        logger.info("Saved %d coverage policy(ies) (by=%s)", len(policies), user_email or "system")
+
+    def get_coverage_waivers_raw(self) -> list[dict]:
+        """Return the stored coverage-waiver list as raw dicts (defensive)."""
+        return self._get_json_list(self._COVERAGE_WAIVERS_KEY)
+
+    def save_coverage_waivers_raw(self, waivers: list[dict], *, user_email: str | None = None) -> None:
+        """Replace the full coverage-waiver list."""
+        self.save_setting(self._COVERAGE_WAIVERS_KEY, json.dumps(waivers), user_email=user_email)
+        logger.info("Saved %d coverage waiver(s) (by=%s)", len(waivers), user_email or "system")
+
+    def _get_json_list(self, key: str) -> list[dict]:
+        """Read a JSON-array setting into a list of dicts, degrading to []."""
+        raw = self.get_setting(key)
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            logger.warning("Setting %s is not valid JSON; treating as empty", key)
+            return []
+        if not isinstance(parsed, list):
+            logger.warning("Setting %s is not a list; treating as empty", key)
+            return []
+        return [item for item in parsed if isinstance(item, dict)]
+
     @staticmethod
     def _normalise_status_entry(item: dict) -> dict:
         value = (item.get("value") or "").strip() if isinstance(item.get("value"), str) else ""

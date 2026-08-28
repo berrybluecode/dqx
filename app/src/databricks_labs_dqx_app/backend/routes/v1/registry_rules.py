@@ -10,6 +10,7 @@ route below blocks (409) deleting a rule that's still applied anywhere.
 from typing import Annotated
 
 from databricks.labs.dqx.errors import UnsafeSqlQueryError
+from databricks.sdk import WorkspaceClient
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from databricks_labs_dqx_app.backend.common.approvals import ApprovalMode, mark_auto_approver, should_auto_approve
@@ -27,6 +28,7 @@ from databricks_labs_dqx_app.backend.dependencies import (
     get_permissions_service,
     get_registry_service,
     get_rule_embeddings_service,
+    get_sp_ws,
     get_tag_reconcile_service,
     require_role,
 )
@@ -56,6 +58,7 @@ from databricks_labs_dqx_app.backend.services.registry_service import (
     DuplicateRegistryRuleError,
     RegistryService,
 )
+from databricks_labs_dqx_app.backend.services.owner_display_name_service import resolve_owners_cached
 from databricks_labs_dqx_app.backend.services.rule_embeddings import RuleEmbeddingsService
 from databricks_labs_dqx_app.backend.services.tag_reconcile_service import TagReconcileService
 
@@ -81,6 +84,34 @@ def _read_label_definitions(app_settings: AppSettingsService) -> list[dict]:
     return definitions if isinstance(definitions, list) else []
 
 
+def _enrich_owner_display_names(
+    outs: list[RegistryRuleOut],
+    sp_ws: WorkspaceClient | None,
+    svc: RegistryService,
+) -> None:
+    """Resolve + persist ``owner_display_name`` for rows that stored a NULL (mutates *outs*).
+
+    Imported rules take their ``owner`` from the contract/YAML (an email) and,
+    together with older rows written before the write-time resolver existed,
+    keep a NULL display name that renders as a raw email beside owners that do
+    show a friendly name. This resolves the missing owners against SCIM (batched
+    + TTL-cached), fills the DTOs so the response is immediately consistent, and
+    writes the names back so the assignment is durable across every surface.
+    Best-effort: unresolvable owners (groups, no SCIM display name) keep their
+    raw identity, and a write-back failure never breaks the read.
+    """
+    missing = [o.owner for o in outs if o.owner and not o.owner_display_name]
+    if not missing:
+        return
+    resolved = resolve_owners_cached(missing, sp_ws)
+    if not resolved:
+        return
+    for out in outs:
+        if not out.owner_display_name and out.owner in resolved:
+            out.owner_display_name = resolved[out.owner]
+    svc.backfill_owner_display_names(resolved)
+
+
 # ------------------------------------------------------------------
 # List / Get
 # ------------------------------------------------------------------
@@ -94,6 +125,7 @@ def _read_label_definitions(app_settings: AppSettingsService) -> list[dict]:
 )
 def list_registry_rules(
     svc: Annotated[RegistryService, Depends(get_registry_service)],
+    sp_ws: Annotated[WorkspaceClient, Depends(get_sp_ws)],
     status: Annotated[str | None, Query(description="Filter by status")] = None,
     dimension: Annotated[str | None, Query(description="Filter by the 'dimension' tag")] = None,
     severity: Annotated[str | None, Query(description="Filter by the 'severity' tag")] = None,
@@ -103,7 +135,12 @@ def list_registry_rules(
     """List Rules Registry entries, optionally filtered."""
     try:
         rules = svc.list_rules(status=status, dimension=dimension, severity=severity, owner=owner, tag=tag)
-        return [RegistryRuleOut.from_domain(r) for r in rules]
+        outs = [RegistryRuleOut.from_domain(r) for r in rules]
+        # Resolve + persist any NULL owner_display_name (imported rules carry an
+        # email owner) so the Owners filter/column shows friendly names
+        # consistently instead of a mix of names and raw emails.
+        _enrich_owner_display_names(outs, sp_ws, svc)
+        return outs
     except Exception as e:
         logger.error(f"Failed to list registry rules: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list registry rules: {e}")

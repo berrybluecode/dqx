@@ -98,6 +98,9 @@ export interface AttentionTable {
   pending: number;
   /** Rules that need manual column mapping in the Apply Rules tab. */
   needsMapping: number;
+  /** 1 when the table had checks applied but couldn't be auto-submitted for
+   *  review (draft-run gate / blocking coverage / error) — submit manually. */
+  needsSubmit: number;
 }
 
 /** Outcome of processing one (contract, schema) group during execute. */
@@ -123,6 +126,12 @@ export interface SchemaOutcome {
   needsMapping: number;
   /** Rules that failed to create or apply. */
   failed: number;
+  /** 1 when this schema's binding was auto-submitted for review (moved to
+   *  ``pending_approval``). Attributed once per binding during the submit pass. */
+  submitted: number;
+  /** 1 when auto-submit was attempted for this schema's binding but blocked
+   *  (draft-run gate / blocking coverage policy / error) — needs manual submit. */
+  submitBlocked: number;
   errors: string[];
 }
 
@@ -138,6 +147,10 @@ export interface ContractResult {
   pending: number;
   needsMapping: number;
   failed: number;
+  /** Tables auto-submitted for review during this import. */
+  submitted: number;
+  /** Tables that had checks applied but couldn't be auto-submitted. */
+  submitBlocked: number;
   errors: string[];
   /** Tables with pending-approval or needs-manual-mapping rules, for deep-links. */
   attentionTables: AttentionTable[];
@@ -159,6 +172,8 @@ export function aggregateByContract(outcomes: SchemaOutcome[]): ContractResult[]
         pending: 0,
         needsMapping: 0,
         failed: 0,
+        submitted: 0,
+        submitBlocked: 0,
         errors: [],
         attentionTables: [],
       };
@@ -172,13 +187,16 @@ export function aggregateByContract(outcomes: SchemaOutcome[]): ContractResult[]
     row.pending += o.pending;
     row.needsMapping += o.needsMapping;
     row.failed += o.failed;
+    row.submitted += o.submitted;
+    row.submitBlocked += o.submitBlocked;
     if (o.errors.length > 0) row.errors.push(...o.errors);
-    if ((o.pending > 0 || o.needsMapping > 0) && o.tableFqn) {
+    if ((o.pending > 0 || o.needsMapping > 0 || o.submitBlocked > 0) && o.tableFqn) {
       row.attentionTables.push({
         fqn: o.tableFqn,
         bindingId: o.bindingId,
         pending: o.pending,
         needsMapping: o.needsMapping,
+        needsSubmit: o.submitBlocked,
       });
     }
   }

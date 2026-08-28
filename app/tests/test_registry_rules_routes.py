@@ -68,10 +68,48 @@ class TestListAndGet:
     def test_list_maps_domain_rules_to_dto(self):
         svc = MagicMock()
         svc.list_rules.return_value = [_rule()]
-        result = list_registry_rules(svc=svc, status="draft")
+        result = list_registry_rules(svc=svc, sp_ws=MagicMock(), status="draft")
         assert len(result) == 1
         assert result[0].rule_id == "r1"
         svc.list_rules.assert_called_once_with(status="draft", dimension=None, severity=None, owner=None, tag=None)
+
+    def test_list_backfills_missing_owner_display_name_on_read(self, monkeypatch):
+        # A row that persisted a NULL owner_display_name (e.g. written before the
+        # write-time resolver, or when SCIM was down) is resolved on read so the
+        # Owners filter/column shows a friendly name instead of a raw email.
+        rule = _rule()
+        rule.owner = "c.psafos@example.com"
+        rule.owner_display_name = None
+        svc = MagicMock()
+        svc.list_rules.return_value = [rule]
+
+        import databricks_labs_dqx_app.backend.routes.v1.registry_rules as mod
+
+        monkeypatch.setattr(
+            mod,
+            "resolve_owners_cached",
+            lambda owners, sp_ws: {"c.psafos@example.com": "Christos Psafos"},
+        )
+        result = list_registry_rules(svc=svc, sp_ws=MagicMock())
+        assert result[0].owner_display_name == "Christos Psafos"
+        # The resolved name is written back so the assignment is durable.
+        svc.backfill_owner_display_names.assert_called_once_with(
+            {"c.psafos@example.com": "Christos Psafos"}
+        )
+
+    def test_list_keeps_raw_owner_when_unresolvable(self, monkeypatch):
+        rule = _rule()
+        rule.owner = "data-eng-group"
+        rule.owner_display_name = None
+        svc = MagicMock()
+        svc.list_rules.return_value = [rule]
+
+        import databricks_labs_dqx_app.backend.routes.v1.registry_rules as mod
+
+        monkeypatch.setattr(mod, "resolve_owners_cached", lambda owners, sp_ws: {})
+        result = list_registry_rules(svc=svc, sp_ws=MagicMock())
+        assert result[0].owner_display_name is None
+        assert result[0].owner == "data-eng-group"
 
     def test_get_returns_detail_with_no_version_when_unpublished(self):
         svc = MagicMock()

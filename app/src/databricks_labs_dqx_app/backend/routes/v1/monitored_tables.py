@@ -21,6 +21,7 @@ from databricks_labs_dqx_app.backend.dependencies import (
     get_app_settings_service,
     get_apply_rules_service,
     get_binding_run_service,
+    get_coverage_policy_service,
     get_discovery_service,
     get_draft_run_gate_service,
     get_materializer,
@@ -37,6 +38,10 @@ from databricks_labs_dqx_app.backend.dependencies import (
     require_role,
 )
 from databricks_labs_dqx_app.backend.services.app_settings_service import AppSettingsService
+from databricks_labs_dqx_app.backend.services.coverage_policy_service import (
+    CoverageBlockedError,
+    CoveragePolicyService,
+)
 from databricks_labs_dqx_app.backend.services.draft_run_gate_service import (
     DraftRunGateService,
     DraftRunRequiredError,
@@ -1169,6 +1174,7 @@ def submit_monitored_table(
     rules_catalog: Annotated[RulesCatalogService, Depends(get_rules_catalog_service)],
     version_svc: Annotated[MonitoredTableVersionService, Depends(get_monitored_table_version_service)],
     app_settings: Annotated[AppSettingsService, Depends(get_app_settings_service)],
+    coverage_svc: Annotated[CoveragePolicyService, Depends(get_coverage_policy_service)],
     draft_run_gate: Annotated[DraftRunGateService, Depends(get_draft_run_gate_service)],
     perms: Annotated[PermissionsService, Depends(get_permissions_service)],
     role: CurrentUserRole,
@@ -1254,6 +1260,13 @@ def submit_monitored_table(
             principal_email=user_email,
         )
         if should_auto_approve(mode, can_edit_and_approve=can_edit_and_approve):
+            # Same coverage-policy gate as the explicit approve path: a blocking
+            # policy that is unsatisfied (and not waived) refuses the
+            # auto-approve shortcut so submit and approve enforce identically.
+            try:
+                coverage_svc.enforce_blocking(binding_id, gate_detail.table.table_fqn)
+            except CoverageBlockedError as e:
+                raise HTTPException(status_code=409, detail=e.detail)
             table, approved, new_version = _approve_binding_checks(
                 monitored_tables_svc,
                 rules_catalog,
@@ -1292,6 +1305,7 @@ def approve_monitored_table(
     monitored_tables_svc: Annotated[MonitoredTableService, Depends(get_monitored_table_service)],
     rules_catalog: Annotated[RulesCatalogService, Depends(get_rules_catalog_service)],
     version_svc: Annotated[MonitoredTableVersionService, Depends(get_monitored_table_version_service)],
+    coverage_svc: Annotated[CoveragePolicyService, Depends(get_coverage_policy_service)],
     obo_ws: Annotated[WorkspaceClient, Depends(get_obo_ws)],
     body: LifecycleRationaleIn | None = None,
 ) -> MonitoredTableReviewOut:
@@ -1325,6 +1339,12 @@ def approve_monitored_table(
                     f"'{detail.table.status}', expected 'pending_approval'"
                 ),
             )
+        # Coverage-policy gate: a blocking policy that is unsatisfied (and not
+        # waived) refuses the approval with a 409 listing the missing coverage.
+        try:
+            coverage_svc.enforce_blocking(binding_id, detail.table.table_fqn)
+        except CoverageBlockedError as e:
+            raise HTTPException(status_code=409, detail=e.detail)
         user_email = _current_user_email(obo_ws)
         table, approved, new_version = _approve_binding_checks(
             monitored_tables_svc,

@@ -625,6 +625,11 @@ function ResultsBody({
       // GroupRowOut. Mirrors MultiTableResults' toRows.
       breached: g.breached ?? false,
       breach_criticality: g.breach_criticality ?? null,
+      // Per-run pass threshold (%) this group was verdicted against, frozen
+      // at materialization time. The By rule box surfaces it so the drilldown
+      // shows the exact threshold each rule was judged by for the picked run.
+      // null when the group's checks used divergent thresholds ("Mixed").
+      pass_threshold: g.pass_threshold ?? null,
     }));
 
   // Build the rows + muted-label set for one facet box.
@@ -1024,6 +1029,7 @@ function ResultsBody({
               onToggleCollapse={() => setRuleColOpen((o) => !o)}
               pageSize={8}
               breachEnabled={thresholdEnabled}
+              showThreshold={thresholdEnabled}
               headerRight={
                 <FacetSearch
                   label={t("resultsUi.facetRule")}

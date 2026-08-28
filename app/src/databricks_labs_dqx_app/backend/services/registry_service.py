@@ -148,6 +148,37 @@ class RegistryService:
         """Total registry rules, any status (homepage stat card)."""
         return self._sql.count(self._table)
 
+    def backfill_owner_display_names(self, resolved: dict[str, str]) -> None:
+        """Persist resolved owner display names onto rows that stored NULL.
+
+        Imported rules take their ``owner`` straight from the contract/YAML (an
+        email), and any row written before the write-time SCIM resolver existed
+        — or when SCIM was momentarily unavailable — kept a NULL
+        ``owner_display_name`` and rendered as a raw email. Once the read path
+        resolves that email to a display name, this writes it back so the
+        friendly name is durably *assigned* and shows consistently on every
+        surface (list, detail, drafts, exports) instead of being re-resolved on
+        each request.
+
+        Only rows still missing a name for that owner are touched, so a name a
+        user set explicitly is never overwritten, and ``updated_at`` is left
+        alone because this is a cosmetic backfill, not a user edit. Best-effort:
+        a failure is swallowed (the next read simply re-resolves).
+        """
+        for owner, display_name in resolved.items():
+            if not owner or not display_name:
+                continue
+            e_owner = escape_sql_string(owner)
+            e_name = escape_sql_string(display_name)
+            sql = (
+                f"UPDATE {self._table} SET owner_display_name = '{e_name}' "  # noqa: S608
+                f"WHERE owner = '{e_owner}' AND (owner_display_name IS NULL OR owner_display_name = '')"
+            )
+            try:
+                self._sql.execute(sql)
+            except Exception:
+                logger.warning("Owner display-name backfill failed for %s (non-fatal)", owner, exc_info=True)
+
     def list_rules(
         self,
         status: str | None = None,

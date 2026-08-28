@@ -543,6 +543,10 @@ export function MultiTableResultsSection({
       total_tests: g.total_tests ?? null,
       breached: g.breached ?? false,
       breach_criticality: g.breach_criticality ?? null,
+      // Per-run pass threshold this group was verdicted against (By rule box
+      // surfaces it via showThreshold); null when checks used divergent
+      // thresholds ("Mixed").
+      pass_threshold: g.pass_threshold ?? null,
     }));
 
   // Registry order for the By dimension / By severity default sort: dimensions
@@ -1043,6 +1047,7 @@ export function MultiTableResultsSection({
                   onToggleCollapse={() => setRuleColOpen((o) => !o)}
                   pageSize={8}
                   breachEnabled={thresholdEnabled}
+                  showThreshold={thresholdEnabled}
                   // The rule NAME navigates to that registry rule's detail
                   // (only for rows with a genuine registry rule_id); clicking
                   // elsewhere on the row still toggles the rule facet — the

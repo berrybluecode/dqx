@@ -16,7 +16,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { ArrowRight, Check, Loader2, Minus, Sparkles } from "lucide-react";
+import { ArrowRight, Check, Loader2, Minus, ShieldAlert, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -77,6 +77,13 @@ interface AiSuggestionDialogProps {
    *  has ALREADY applied this session (unsaved), which the backend can't know
    *  about (it only excludes persisted mappings). */
   appliedRules: AppliedRuleMappingLike[];
+  /** Suggestion keys (see `suggestionKey`) that an admin COVERAGE POLICY
+   *  requires on the table. Highlighted in the list and pre-selected so they
+   *  can't be missed. Optional — empty when no policy applies. */
+  requiredKeys?: Set<string>;
+  /** Maps a required suggestion key to the coverage policy name that mandates
+   *  it, shown in the "Required" badge tooltip. */
+  requiredPolicyByKey?: Map<string, string>;
   /** Appends one locally-staged row per accepted suggestion. Pure
    *  local-state mutation — no network call. */
   onAdd: (rows: ReturnType<typeof newStagedRow>[], columnContext?: ColumnRef | null) => void;
@@ -91,10 +98,15 @@ export function AiSuggestionDialog({
   state,
   loading,
   appliedRules,
+  requiredKeys,
+  requiredPolicyByKey,
   onAdd,
   onApplied,
 }: AiSuggestionDialogProps) {
   const { t } = useTranslation();
+  const isRequired = (s: SuggestedRuleMappingOut) => requiredKeys?.has(suggestionKey(s)) ?? false;
+  const requiredPolicyLabel = (s: SuggestedRuleMappingOut) =>
+    requiredPolicyByKey?.get(suggestionKey(s));
   const defaultAutoUpgrade = useDefaultAutoUpgrade();
   // Suggestions only carry `rule_id` — resolving it back to a full
   // `RegistryRuleOut` is what lets `newStagedRow` denormalize the rule's
@@ -278,6 +290,8 @@ export function AiSuggestionDialog({
                     toggleAllLabel={t("monitoredTables.suggestRulesToggleAll", { label: first.rule_name || first.rule_id })}
                     onToggleGroup={() => toggleGroup(group.items)}
                     isSelected={(s) => selected.has(suggestionKey(s))}
+                    isRequired={isRequired}
+                    requiredPolicyLabel={requiredPolicyLabel}
                     onToggle={(s) => toggle(suggestionKey(s))}
                   />
                 );
@@ -296,6 +310,8 @@ export function AiSuggestionDialog({
                   labelDefinitions={labelDefinitions}
                   onToggleGroup={() => toggleGroup(group.items)}
                   isSelected={(s) => selected.has(suggestionKey(s))}
+                  isRequired={isRequired}
+                  requiredPolicyLabel={requiredPolicyLabel}
                   onToggle={(s) => toggle(suggestionKey(s))}
                 />
               ))}
@@ -472,15 +488,33 @@ function SuggestionGroupCard({
   );
 }
 
+/** "Required by policy" pill — marks a suggestion an admin coverage policy
+ *  mandates on this table. Uses the same amber palette as the coverage-gap
+ *  affordances on the table page so the two read as one concept. */
+function RequiredBadge({ policyName }: { policyName?: string }) {
+  const { t } = useTranslation();
+  return (
+    <span
+      title={policyName ? t("monitoredTables.suggestRulesRequiredTooltip", { policy: policyName }) : undefined}
+      className="inline-flex items-center gap-1 rounded border border-amber-400/60 bg-amber-400/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:border-amber-300/50 dark:text-amber-300"
+    >
+      <ShieldAlert className="h-3 w-3" />
+      {t("monitoredTables.suggestRulesRequiredBadge")}
+    </span>
+  );
+}
+
 /** Toggleable compact row shell shared by the by-rule and by-column rows. */
 function SuggestionRow({
   label,
   selected,
+  required,
   onToggle,
   children,
 }: {
   label: string;
   selected: boolean;
+  required?: boolean;
   onToggle: () => void;
   children: ReactNode;
 }) {
@@ -501,7 +535,9 @@ function SuggestionRow({
         "rounded p-2 space-y-1 cursor-pointer select-none transition-colors",
         selected
           ? "border border-fuchsia-500/60 bg-fuchsia-500/5 dark:border-fuchsia-400/50"
-          : "border border-border hover:border-muted-foreground/40",
+          : required
+            ? "border border-amber-400/60 bg-amber-400/5 dark:border-amber-300/50"
+            : "border border-border hover:border-muted-foreground/40",
       )}
     >
       {children}
@@ -528,6 +564,8 @@ function RuleGroupCard({
   toggleAllLabel,
   onToggleGroup,
   isSelected,
+  isRequired,
+  requiredPolicyLabel,
   onToggle,
 }: {
   ruleName: string;
@@ -542,8 +580,12 @@ function RuleGroupCard({
   toggleAllLabel: string;
   onToggleGroup: () => void;
   isSelected: (s: SuggestedRuleMappingOut) => boolean;
+  isRequired: (s: SuggestedRuleMappingOut) => boolean;
+  requiredPolicyLabel: (s: SuggestedRuleMappingOut) => string | undefined;
   onToggle: (s: SuggestedRuleMappingOut) => void;
 }) {
+  // The rule header shows the badge when ANY of its column options is required.
+  const groupRequired = items.find((s) => isRequired(s));
   return (
     <SuggestionGroupCard
       groupIndex={groupIndex}
@@ -555,12 +597,19 @@ function RuleGroupCard({
           <span className="text-sm font-semibold">{ruleName}</span>
           {dimension && <TagBadge label={dimension} color={dimensionColor} />}
           {severity && <SeverityBadge severity={severity} color={severityColor} />}
+          {groupRequired && <RequiredBadge policyName={requiredPolicyLabel(groupRequired)} />}
         </>
       }
       subhead={ruleDescription ? <p className="text-xs text-muted-foreground">{ruleDescription}</p> : undefined}
     >
       {items.map((s) => (
-        <MappingRow key={suggestionKey(s)} suggestion={s} selected={isSelected(s)} onToggle={() => onToggle(s)} />
+        <MappingRow
+          key={suggestionKey(s)}
+          suggestion={s}
+          selected={isSelected(s)}
+          required={isRequired(s)}
+          onToggle={() => onToggle(s)}
+        />
       ))}
     </SuggestionGroupCard>
   );
@@ -570,15 +619,17 @@ function RuleGroupCard({
 function MappingRow({
   suggestion: s,
   selected,
+  required,
   onToggle,
 }: {
   suggestion: SuggestedRuleMappingOut;
   selected: boolean;
+  required?: boolean;
   onToggle: () => void;
 }) {
   const cols = Object.values(s.column_mapping ?? {}).join(", ");
   return (
-    <SuggestionRow label={cols || s.rule_name || s.rule_id} selected={selected} onToggle={onToggle}>
+    <SuggestionRow label={cols || s.rule_name || s.rule_id} selected={selected} required={required} onToggle={onToggle}>
       <MappingChipsInline suggestion={s} />
       {s.explanation && <p className="text-xs text-muted-foreground">{s.explanation}</p>}
     </SuggestionRow>
@@ -600,6 +651,8 @@ function ColumnGroupCard({
   labelDefinitions,
   onToggleGroup,
   isSelected,
+  isRequired,
+  requiredPolicyLabel,
   onToggle,
 }: {
   column: string;
@@ -610,21 +663,31 @@ function ColumnGroupCard({
   labelDefinitions: LabelDefinition[];
   onToggleGroup: () => void;
   isSelected: (s: SuggestedRuleMappingOut) => boolean;
+  isRequired: (s: SuggestedRuleMappingOut) => boolean;
+  requiredPolicyLabel: (s: SuggestedRuleMappingOut) => string | undefined;
   onToggle: (s: SuggestedRuleMappingOut) => void;
 }) {
+  const groupRequired = items.find((s) => isRequired(s));
   return (
     <SuggestionGroupCard
       groupIndex={groupIndex}
       groupState={groupState}
       toggleAllLabel={toggleAllLabel}
       onToggleGroup={onToggleGroup}
-      header={<span className="font-mono text-sm font-semibold">{column}</span>}
+      header={
+        <>
+          <span className="font-mono text-sm font-semibold">{column}</span>
+          {groupRequired && <RequiredBadge policyName={requiredPolicyLabel(groupRequired)} />}
+        </>
+      }
     >
       {items.map((s) => (
         <ColumnRuleRow
           key={suggestionKey(s)}
           suggestion={s}
           selected={isSelected(s)}
+          required={isRequired(s)}
+          policyName={requiredPolicyLabel(s)}
           dimensionColor={s.dimension ? colorFor(labelDefinitions, RESERVED_DIMENSION_KEY, s.dimension) : undefined}
           severityColor={s.severity ? colorFor(labelDefinitions, RESERVED_SEVERITY_KEY, s.severity) : undefined}
           onToggle={() => onToggle(s)}
@@ -639,22 +702,27 @@ function ColumnGroupCard({
 function ColumnRuleRow({
   suggestion: s,
   selected,
+  required,
+  policyName,
   dimensionColor,
   severityColor,
   onToggle,
 }: {
   suggestion: SuggestedRuleMappingOut;
   selected: boolean;
+  required?: boolean;
+  policyName?: string;
   dimensionColor?: string;
   severityColor?: string;
   onToggle: () => void;
 }) {
   return (
-    <SuggestionRow label={s.rule_name || s.rule_id} selected={selected} onToggle={onToggle}>
+    <SuggestionRow label={s.rule_name || s.rule_id} selected={selected} required={required} onToggle={onToggle}>
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-sm font-semibold">{s.rule_name || s.rule_id}</span>
         {s.dimension && <TagBadge label={s.dimension} color={dimensionColor} />}
         {s.severity && <SeverityBadge severity={s.severity} color={severityColor} />}
+        {required && <RequiredBadge policyName={policyName} />}
       </div>
       {s.explanation && <p className="text-xs text-muted-foreground">{s.explanation}</p>}
       <MappingChipsInline suggestion={s} />

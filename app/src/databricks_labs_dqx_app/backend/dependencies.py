@@ -25,6 +25,7 @@ from .services.ai_gateway import AIGateway
 from .services.ai_rules_service import AiRulesService
 from .services.app_settings_service import AppSettingsService
 from .services.contract_rules_service import ContractRulesService
+from .services.coverage_policy_service import CoveragePolicyService
 from .services.database_reset_service import DatabaseResetService
 from .services.discovery import DiscoveryService
 from .services.draft_run_gate_service import DraftRunGateService
@@ -616,6 +617,30 @@ async def get_discovery_service(
     return DiscoveryService(ws=obo_ws, user_id=user_id, sql=obo_sql)
 
 
+async def get_coverage_policy_service(
+    app_settings: Annotated[AppSettingsService, Depends(get_app_settings_service)],
+    rules_catalog: Annotated[RulesCatalogService, Depends(get_rules_catalog_service)],
+    discovery: Annotated[DiscoveryService, Depends(get_discovery_service)],
+    apply_rules: Annotated[ApplyRulesService, Depends(get_apply_rules_service)],
+) -> CoveragePolicyService:
+    """Create a CoveragePolicyService.
+
+    Policies + waivers persist via the SP-scoped ``AppSettingsService``; live
+    table columns / primary keys are resolved through the OBO ``DiscoveryService``
+    (so the caller's Unity Catalog permissions apply); applied checks come from
+    the SP-scoped rules catalog + the tier-2 apply link (``ApplyRulesService``),
+    the latter letting a policy require a specific REGISTRY RULE (by rule_id) on
+    each matching column. The enforcement + report call sites therefore read the
+    table under the acting user's UC grants.
+    """
+    return CoveragePolicyService(
+        app_settings=app_settings,
+        rules_catalog=rules_catalog,
+        discovery=discovery,
+        apply_rules=apply_rules,
+    )
+
+
 async def get_rule_suggester(
     monitored_tables: Annotated[MonitoredTableService, Depends(get_monitored_table_service)],
     registry: Annotated[RegistryService, Depends(get_registry_service)],
@@ -1199,6 +1224,7 @@ __all__ = [
     "get_binding_run_service",
     "get_data_product_service",
     "get_discovery_service",
+    "get_coverage_policy_service",
     "get_view_service",
     "get_job_service",
     "get_sql_connector",

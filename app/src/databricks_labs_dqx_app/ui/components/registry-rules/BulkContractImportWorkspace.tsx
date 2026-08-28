@@ -9,11 +9,14 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Database,
   ExternalLink,
   FileText,
+  Info,
   ListChecks,
   Loader2,
   Play,
+  SlidersHorizontal,
   Upload,
   X,
   XCircle,
@@ -54,6 +57,7 @@ import {
   getGetTableColumnsQueryOptions,
   getListMonitoredTablesQueryOptions,
   getListSchemasQueryOptions,
+  submitMonitoredTable,
   useListCatalogs,
   useListCheckFunctions,
   type ColumnOut,
@@ -113,6 +117,49 @@ interface SchemaPlanEntry {
 
 type Phase = "config" | "preview" | "results";
 
+// The results view is otherwise ephemeral React state: jumping to a table's
+// Apply Rules tab (or leaving the page) drops the per-contract summary, so
+// there's no way back to finish the remaining tables. We persist the last run
+// to localStorage and restore it on mount so the summary survives navigation.
+const LAST_RUN_STORAGE_KEY = "dqx.bulk-contract-import.last-run.v1";
+
+interface PersistedRun {
+  savedAt: number;
+  results: ContractResult[];
+}
+
+function loadPersistedRun(): PersistedRun | null {
+  try {
+    const raw = localStorage.getItem(LAST_RUN_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedRun;
+    if (!parsed || !Array.isArray(parsed.results) || typeof parsed.savedAt !== "number") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function savePersistedRun(results: ContractResult[]): number {
+  const savedAt = Date.now();
+  try {
+    localStorage.setItem(LAST_RUN_STORAGE_KEY, JSON.stringify({ savedAt, results }));
+  } catch {
+    // Best-effort: private mode / quota exhaustion just means no persistence.
+  }
+  return savedAt;
+}
+
+function clearPersistedRun(): void {
+  try {
+    localStorage.removeItem(LAST_RUN_STORAGE_KEY);
+  } catch {
+    // Ignore — nothing to clean up if storage is unavailable.
+  }
+}
+
 /** Splits a 3-part "catalog.schema.table" FQN into its parts. */
 function splitFqn(fqn: string): [string, string, string] {
   const parts = fqn.split(".");
@@ -146,6 +193,7 @@ export function BulkContractImportWorkspace({ onDone }: { onDone: () => void }) 
   const { canApproveRules } = usePermissions();
 
   const [files, setFiles] = useState<ContractFileInput[]>([]);
+  const [dragActive, setDragActive] = useState(false);
   const [targetCatalog, setTargetCatalog] = useState<string>("");
   const [targetSchema, setTargetSchema] = useState<string>("");
 
@@ -158,11 +206,15 @@ export function BulkContractImportWorkspace({ onDone }: { onDone: () => void }) 
   // immediately instead of waiting in the approval queue.
   const [skipApproval, setSkipApproval] = useState(false);
 
-  const [phase, setPhase] = useState<Phase>("config");
+  // Read the persisted run once so returning to this tab (or reloading) lands
+  // straight back on the results summary instead of a blank config form.
+  const persistedRun = useMemo(() => loadPersistedRun(), []);
+  const [phase, setPhase] = useState<Phase>(persistedRun ? "results" : "config");
   const [isGenerating, setIsGenerating] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
   const [plan, setPlan] = useState<SchemaPlanEntry[] | null>(null);
-  const [results, setResults] = useState<ContractResult[] | null>(null);
+  const [results, setResults] = useState<ContractResult[] | null>(persistedRun?.results ?? null);
+  const [savedAt, setSavedAt] = useState<number | null>(persistedRun?.savedAt ?? null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const { data: catalogsResp, isLoading: catalogsLoading } = useListCatalogs();
@@ -210,6 +262,7 @@ export function BulkContractImportWorkspace({ onDone }: { onDone: () => void }) 
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    setDragActive(false);
     if (busy) return;
     if (e.dataTransfer.files) void addFiles(e.dataTransfer.files);
   };
@@ -389,6 +442,8 @@ export function BulkContractImportWorkspace({ onDone }: { onDone: () => void }) 
           pending: 0,
           needsMapping: 0,
           failed: entry.parseErrors.length,
+          submitted: 0,
+          submitBlocked: 0,
           errors: [...entry.parseErrors],
         };
 
@@ -511,9 +566,49 @@ export function BulkContractImportWorkspace({ onDone }: { onDone: () => void }) 
         }
       }
 
+      // Auto-submit for review any binding that actually got a check applied,
+      // so imported tables land in the "Tables pending approval" queue instead
+      // of sitting as invisible drafts. Only bindings with a materialized check
+      // have something to review — pending-only tables (rule awaiting approval)
+      // auto-apply on the rule's approval and have nothing to submit yet.
+      // Submit is deduped per binding; a failure (draft-run gate, blocking
+      // coverage policy, or transient error) leaves the table a draft the user
+      // can submit manually, reported as "needs submit" in the results.
+      const appliedByBinding = new Map<string, number>();
+      for (const o of outcomes) {
+        if (o.bindingId && o.applied > 0) {
+          appliedByBinding.set(o.bindingId, (appliedByBinding.get(o.bindingId) ?? 0) + o.applied);
+        }
+      }
+      const submitResultByBinding = new Map<string, "submitted" | "blocked">();
+      let anySubmitted = false;
+      for (const bId of appliedByBinding.keys()) {
+        try {
+          await submitMonitoredTable(bId, { rationale: t("rulesBulkImport.results.submitRationale") });
+          submitResultByBinding.set(bId, "submitted");
+          anySubmitted = true;
+        } catch {
+          submitResultByBinding.set(bId, "blocked");
+        }
+      }
+      // Attribute the submit result to the first outcome per binding so the
+      // per-contract counts don't double up when several schemas share a table.
+      const submitAnnotated = new Set<string>();
+      for (const o of outcomes) {
+        if (!o.bindingId || submitAnnotated.has(o.bindingId)) continue;
+        const result = submitResultByBinding.get(o.bindingId);
+        if (!result) continue;
+        submitAnnotated.add(o.bindingId);
+        if (result === "submitted") o.submitted = 1;
+        else o.submitBlocked = 1;
+      }
+      if (anySubmitted) invalidateAfterMonitoredTableChange(queryClient);
+
       toast.dismiss(toastId);
       if (anyApplied) invalidateResultsAfterRuleApplicationChange(queryClient);
-      setResults(aggregateByContract(outcomes));
+      const run = aggregateByContract(outcomes);
+      setResults(run);
+      setSavedAt(savePersistedRun(run));
       setPhase("results");
       toast.success(t("rulesBulkImport.toast.done"));
     } catch {
@@ -535,6 +630,8 @@ export function BulkContractImportWorkspace({ onDone }: { onDone: () => void }) 
   };
 
   const startOver = () => {
+    clearPersistedRun();
+    setSavedAt(null);
     setPhase("config");
     setPlan(null);
     setResults(null);
@@ -552,7 +649,14 @@ export function BulkContractImportWorkspace({ onDone }: { onDone: () => void }) 
 
   // ── Render ─────────────────────────────────────────────────────────────────
   if (phase === "results" && results) {
-    return <BulkResults results={results} onStartOver={startOver} onDone={onDone} />;
+    return (
+      <BulkResults
+        results={results}
+        savedAt={savedAt}
+        onStartOver={startOver}
+        onDone={onDone}
+      />
+    );
   }
 
   if (phase === "preview" && plan) {
@@ -594,33 +698,74 @@ export function BulkContractImportWorkspace({ onDone }: { onDone: () => void }) 
 
   return (
     <div className="space-y-6">
-      <Card>
+      <Card className="overflow-hidden">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <FileText className="h-4 w-4" />
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-primary">
+              <FileText className="h-4 w-4" />
+            </span>
             {t("rulesBulkImport.upload.title")}
+            {files.length > 0 && (
+              <Badge variant="secondary" className="ml-1 text-[10px]">
+                {t("rulesBulkImport.upload.fileCount", { count: files.length })}
+              </Badge>
+            )}
           </CardTitle>
+          <CardDescription>{t("rulesBulkImport.upload.subtitle")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div
             onDrop={handleDrop}
             onDragOver={(e) => e.preventDefault()}
-            className="flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed p-6 text-center transition-colors hover:bg-muted/30"
+            onDragEnter={() => !busy && setDragActive(true)}
+            onDragLeave={() => setDragActive(false)}
+            role="button"
+            tabIndex={0}
+            onClick={() => !busy && fileInputRef.current?.click()}
+            onKeyDown={(e) => {
+              if ((e.key === "Enter" || e.key === " ") && !busy) {
+                e.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
+            className={cn(
+              "flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed p-8 text-center outline-none transition-colors",
+              "focus-visible:ring-2 focus-visible:ring-ring",
+              dragActive
+                ? "border-primary bg-primary/5"
+                : "border-muted-foreground/25 hover:border-primary/40 hover:bg-muted/30",
+              busy && "pointer-events-none opacity-60",
+            )}
           >
-            <Upload className="h-6 w-6 text-muted-foreground" />
-            <div className="text-sm text-muted-foreground">
-              {t("rulesBulkImport.upload.dropzone")}
+            <span
+              className={cn(
+                "flex h-12 w-12 items-center justify-center rounded-full transition-colors",
+                dragActive ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground",
+              )}
+            >
+              <Upload className="h-5 w-5" />
+            </span>
+            <div className="text-sm font-medium">
+              {dragActive
+                ? t("rulesBulkImport.upload.dropzoneActive")
+                : t("rulesBulkImport.upload.dropzone")}
             </div>
             <Button
               variant="outline"
               size="sm"
-              onClick={() => fileInputRef.current?.click()}
+              onClick={(e) => {
+                e.stopPropagation();
+                fileInputRef.current?.click();
+              }}
               className="gap-2"
               disabled={busy}
             >
               <Upload className="h-4 w-4" />
               {t("rulesBulkImport.upload.chooseFiles")}
             </Button>
+            <p className="text-[11px] text-muted-foreground">
+              {t("rulesBulkImport.upload.dropzoneHint")}
+            </p>
             <input
               ref={fileInputRef}
               type="file"
@@ -636,36 +781,38 @@ export function BulkContractImportWorkspace({ onDone }: { onDone: () => void }) 
               {t("rulesBulkImport.upload.empty")}
             </p>
           ) : (
-            <div className="space-y-2">
-              <Label>{t("rulesBulkImport.upload.fileCount", { count: files.length })}</Label>
-              <ul className="space-y-1.5">
-                {files.map((f) => (
-                  <li
-                    key={f.id}
-                    className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm"
+            <ul className="space-y-1.5">
+              {files.map((f) => (
+                <li
+                  key={f.id}
+                  className="group flex items-center gap-2.5 rounded-lg border bg-card px-3 py-2 text-sm transition-colors hover:bg-muted/40"
+                >
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                    <FileText className="h-3.5 w-3.5" />
+                  </span>
+                  <span className="flex-1 truncate font-mono text-xs">{f.filename}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeFile(f.id)}
+                    disabled={busy}
+                    className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+                    aria-label={t("rulesBulkImport.upload.removeFile")}
                   >
-                    <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <span className="flex-1 truncate font-mono text-xs">{f.filename}</span>
-                    <button
-                      type="button"
-                      onClick={() => removeFile(f.id)}
-                      disabled={busy}
-                      className="text-muted-foreground hover:text-destructive disabled:opacity-50"
-                      aria-label={t("rulesBulkImport.upload.removeFile")}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className="overflow-hidden">
         <CardHeader>
-          <CardTitle className="flex items-center gap-1.5 text-base">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-primary">
+              <Database className="h-4 w-4" />
+            </span>
             {t("rulesBulkImport.target.title")}
             {/* The catalog/schema below is only a fallback for contracts whose
                 schema has no fully-qualified physical name — too important to
@@ -725,9 +872,14 @@ export function BulkContractImportWorkspace({ onDone }: { onDone: () => void }) 
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className="overflow-hidden">
         <CardHeader>
-          <CardTitle className="text-base">{t("rulesBulkImport.options.title")}</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-primary">
+              <SlidersHorizontal className="h-4 w-4" />
+            </span>
+            {t("rulesBulkImport.options.title")}
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-5">
           <OptionGroup title={t("rulesBulkImport.options.groupSchemaTitle")}>
@@ -976,10 +1128,12 @@ function BulkPreview({
 
 function BulkResults({
   results,
+  savedAt,
   onStartOver,
   onDone,
 }: {
   results: ContractResult[];
+  savedAt: number | null;
   onStartOver: () => void;
   onDone: () => void;
 }) {
@@ -996,6 +1150,18 @@ function BulkResults({
           <CardDescription>{t("rulesBulkImport.results.description")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          {savedAt != null && (
+            <div className="flex items-start gap-2 rounded-lg border bg-muted/30 p-3">
+              <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <p className="text-xs text-muted-foreground">
+                {t("rulesBulkImport.results.savedAt", {
+                  time: new Date(savedAt).toLocaleString(),
+                })}{" "}
+                {t("rulesBulkImport.results.restoredNote")}
+              </p>
+            </div>
+          )}
+
           {results.map((r) => (
             <ContractResultRow key={r.contractId} result={r} />
           ))}
@@ -1054,6 +1220,13 @@ function ContractResultRow({ result }: { result: ContractResult }) {
             <Stat label={t("rulesBulkImport.results.reused")} value={result.reused} />
           )}
           <Stat label={t("rulesBulkImport.results.applied")} value={result.applied} tone="good" />
+          {result.submitted > 0 && (
+            <Stat
+              label={t("rulesBulkImport.results.submitted")}
+              value={result.submitted}
+              tone="good"
+            />
+          )}
           {result.pending > 0 && (
             <Stat label={t("rulesBulkImport.results.pending")} value={result.pending} tone="warn" />
           )}
@@ -1061,6 +1234,13 @@ function ContractResultRow({ result }: { result: ContractResult }) {
             <Stat
               label={t("rulesBulkImport.results.needsMapping")}
               value={result.needsMapping}
+              tone="warn"
+            />
+          )}
+          {result.submitBlocked > 0 && (
+            <Stat
+              label={t("rulesBulkImport.results.needsSubmit")}
+              value={result.submitBlocked}
               tone="warn"
             />
           )}
@@ -1092,11 +1272,18 @@ function ContractResultRow({ result }: { result: ContractResult }) {
                         {t("rulesBulkImport.results.attentionNeedsMapping", { count: tbl.needsMapping })}
                       </span>
                     )}
+                    {tbl.needsSubmit > 0 && (
+                      <span className="text-amber-700 dark:text-amber-400">
+                        {t("rulesBulkImport.results.attentionNeedsSubmit")}
+                      </span>
+                    )}
                     {tbl.bindingId ? (
                       <Link
                         to="/monitored-tables/$bindingId"
                         params={{ bindingId: tbl.bindingId }}
                         search={{ tab: "apply-rules" }}
+                        target="_blank"
+                        rel="noopener noreferrer"
                         className="inline-flex items-center gap-1 text-primary hover:underline"
                       >
                         {t("rulesBulkImport.results.openApplyTab")}

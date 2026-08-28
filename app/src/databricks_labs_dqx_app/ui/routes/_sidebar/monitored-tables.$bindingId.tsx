@@ -62,6 +62,7 @@ import {
   RotateCcw,
   Save,
   Send,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Undo2,
@@ -92,6 +93,10 @@ import {
   useGetSampleQuestions,
   useRevertMonitoredTable,
   getListTagSuggestionsQueryOptions,
+  useGetCoverageReport,
+  getGetCoverageReportQueryKey,
+  useGrantCoverageWaiver,
+  useRevokeCoverageWaiver,
   type AppliedRuleOut,
   type ColumnOut,
   type MonitoredTableOut,
@@ -100,6 +105,7 @@ import {
   type SuggestedRuleMappingOut,
   type TableDataOut,
   type TagRuleSuggestionOut,
+  type CoveragePolicyEvaluation,
 } from "@/lib/api";
 import {
   DropdownMenu,
@@ -146,6 +152,7 @@ import {
   formatProfileDuration,
 } from "@/lib/profile-format";
 import { cn } from "@/lib/utils";
+import type { AxiosError } from "axios";
 import { useAiAvailability, aiUnavailableReason } from "@/hooks/use-ai-availability";
 import { AI_BUTTON_BG, AI_BANNER_BG, AI_BANNER_BORDER, AI_GRADIENT_URL } from "@/lib/ai-style";
 import { AddRulesDialog } from "@/components/apply-rules/AddRulesDialog";
@@ -948,7 +955,7 @@ function MonitoredTableDetailPage() {
           </div>
 
           <TabsContent value="about">
-            <AboutTab table={table} onColumnClick={handleColumnDeepLink} />
+            <AboutTab table={table} bindingId={bindingId} onColumnClick={handleColumnDeepLink} />
           </TabsContent>
 
           {/* pt-4 matches the other tabs' top spacing (About/Schedule own it internally). */}
@@ -1132,6 +1139,17 @@ function RunTableAction({
   const canRunDraft = table.status === "draft" || isDirty;
   const noRulesRunNow = !runNowHasRules;
   const noRulesRunDraft = !runDraftHasRules;
+  // "Run now" ALWAYS executes the approved server-side snapshot, so any
+  // applied-rule change the user has made but not yet had approved (a
+  // just-edited pass threshold being the motivating case) is silently
+  // ignored by it — the run would use the OLD approved threshold while the
+  // editor shows the new one. To avoid that trap, Run now is disabled from
+  // the moment the config diverges from the approved snapshot (unsaved edits,
+  // or a draft/pending_approval/rejected binding) until the change is
+  // approved. Run draft stays available as the preview path (it renders the
+  // current draft, threshold included), and once approval bumps the version
+  // Run now re-enables and runs the new value.
+  const hasUnapprovedEdits = isDirty || table.status !== "approved";
   // Spans the whole save-then-run sequence in `handleRunDraft`, not just
   // `runMutation.isPending`. `onSaveDraft` runs against the caller's own save
   // mutation (not visible here), so without this a fast double-click could
@@ -1208,7 +1226,7 @@ function RunTableAction({
     : canRunDraft && !noRulesRunDraft;
   const menuHasActionable = versions.length > 0 || demotedActionable;
 
-  const approvedDisabled = !hasApproved || noRulesRunNow || busy;
+  const approvedDisabled = !hasApproved || noRulesRunNow || busy || hasUnapprovedEdits;
   // Even when enabled, the approved run shows a tooltip naming the version it
   // runs (item 52) — the button label itself is a plain "Run now".
   const approvedTooltip = runInProgress
@@ -1217,7 +1235,9 @@ function RunTableAction({
       ? t("monitoredTables.runDisabledNoRulesHint")
       : !hasApproved
         ? t("monitoredTables.runNowDisabledHint")
-        : t("monitoredTables.runNowTooltip", { version: table.version });
+        : hasUnapprovedEdits
+          ? t("monitoredTables.runNowUnapprovedHint", { version: table.version })
+          : t("monitoredTables.runNowTooltip", { version: table.version });
   const draftDisabled = !canRunDraft || noRulesRunDraft || busy;
   const draftTooltip = runInProgress
     ? t("monitoredTables.runInProgressHint")
@@ -1414,11 +1434,243 @@ function ColumnTagsCell({ tags }: { tags: string[] }) {
   );
 }
 
+/** Per-policy row inside the coverage compliance panel: shows a policy's
+ *  satisfied/waived/missing state and, for admins, the waive / remove-waiver
+ *  action. */
+function CoverageEvaluationRow({
+  bindingId,
+  evaluation,
+  ruleName,
+  isAdmin,
+  onChanged,
+}: {
+  bindingId: string;
+  evaluation: CoveragePolicyEvaluation;
+  ruleName: string;
+  isAdmin: boolean;
+  onChanged: () => void;
+}) {
+  const [waiveOpen, setWaiveOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const grant = useGrantCoverageWaiver();
+  const revoke = useRevokeCoverageWaiver();
+
+  const blocking = evaluation.enforcement === "blocking";
+  const missing = evaluation.missing_columns ?? [];
+  const matched = evaluation.matched_columns ?? [];
+  const waived = evaluation.waived ?? false;
+  const satisfied = evaluation.satisfied;
+
+  const stateBadge = waived ? (
+    <Badge variant="outline" className="gap-1 text-amber-600 border-amber-300">
+      <Info className="h-3 w-3" /> Waived
+    </Badge>
+  ) : satisfied ? (
+    <Badge variant="outline" className="gap-1 text-emerald-600 border-emerald-300">
+      <CheckCircle2 className="h-3 w-3" /> Covered
+    </Badge>
+  ) : blocking ? (
+    <Badge variant="outline" className="gap-1 text-destructive border-destructive/40">
+      <XCircle className="h-3 w-3" /> Blocking gap
+    </Badge>
+  ) : (
+    <Badge variant="outline" className="gap-1 text-amber-600 border-amber-300">
+      <AlertTriangle className="h-3 w-3" /> Advisory gap
+    </Badge>
+  );
+
+  const doGrant = () => {
+    grant.mutate(
+      { data: { binding_id: bindingId, policy_id: evaluation.policy_id, reason: reason.trim() } },
+      {
+        onSuccess: () => {
+          toast.success("Coverage waiver granted.");
+          setWaiveOpen(false);
+          setReason("");
+          onChanged();
+        },
+        onError: (err) => {
+          const ax = err as AxiosError<{ detail?: string }>;
+          toast.error(ax?.response?.data?.detail ?? "Failed to grant waiver.");
+        },
+      },
+    );
+  };
+
+  const doRevoke = () => {
+    revoke.mutate(
+      { bindingId, policyId: evaluation.policy_id },
+      {
+        onSuccess: () => {
+          toast.success("Coverage waiver removed.");
+          onChanged();
+        },
+        onError: (err) => {
+          const ax = err as AxiosError<{ detail?: string }>;
+          toast.error(ax?.response?.data?.detail ?? "Failed to remove waiver.");
+        },
+      },
+    );
+  };
+
+  return (
+    <div className="flex items-start justify-between gap-3 border-t px-3 py-2.5 first:border-t-0">
+      <div className="min-w-0 space-y-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-medium">{evaluation.name}</span>
+          <Badge variant="secondary" className="text-[10px] uppercase">
+            {blocking ? "Blocking" : "Advisory"}
+          </Badge>
+          {stateBadge}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Requires <span className="font-medium">{ruleName}</span> on every{" "}
+          {evaluation.column_type !== "any" && (
+            <>
+              <span className="font-mono">{evaluation.column_type}</span>{" "}
+            </>
+          )}
+          {evaluation.primary_key_only ? "primary-key " : ""}column
+          {matched.length > 0 ? ` (${matched.length} matched)` : ""}.
+        </p>
+        {!satisfied && !waived && missing.length > 0 && (
+          <p className="text-xs">
+            <span className="text-muted-foreground">Missing on: </span>
+            <span className="font-mono">{missing.slice(0, 12).join(", ")}</span>
+            {missing.length > 12 ? ` +${missing.length - 12} more` : ""}
+          </p>
+        )}
+        {waived && evaluation.waiver_reason && (
+          <p className="text-xs text-muted-foreground">Reason: {evaluation.waiver_reason}</p>
+        )}
+      </div>
+      {isAdmin && !satisfied && (
+        <div className="shrink-0">
+          {waived ? (
+            <Button variant="ghost" size="sm" onClick={doRevoke} disabled={revoke.isPending}>
+              Remove waiver
+            </Button>
+          ) : (
+            <AlertDialog open={waiveOpen} onOpenChange={setWaiveOpen}>
+              <Button variant="outline" size="sm" onClick={() => setWaiveOpen(true)}>
+                Waive
+              </Button>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Waive coverage policy</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Exempt this table from “{evaluation.name}”. A waiver lets the binding be approved despite the
+                    missing coverage. Optionally record why.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <Input
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  placeholder="Reason (optional)"
+                  className="h-8 text-sm"
+                />
+                <AlertDialogFooter>
+                  <AlertDialogCancel onClick={() => setReason("")}>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={doGrant} disabled={grant.isPending}>
+                    Grant waiver
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Coverage compliance panel — surfaces every enabled, in-scope coverage
+ *  policy's satisfied/missing state for this monitored table (advisory +
+ *  blocking alike), and lets admins waive a policy for the binding. Renders
+ *  nothing when no policy applies to the table. */
+function CoverageComplianceCard({ bindingId }: { bindingId: string }) {
+  const perms = usePermissions();
+  const queryClient = useQueryClient();
+  const reportQuery = useGetCoverageReport(bindingId);
+  const { data: registryRules } = useListRegistryRules({ status: "approved" });
+
+  const ruleNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const r of registryRules?.data ?? []) {
+      const meta = (r.user_metadata ?? {}) as Record<string, unknown>;
+      const name = typeof meta.name === "string" && meta.name.trim() ? meta.name.trim() : r.rule_id;
+      map.set(r.rule_id, name);
+    }
+    return map;
+  }, [registryRules]);
+
+  const report = reportQuery.data?.data;
+  const evaluations = report?.evaluations ?? [];
+
+  const invalidate = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: getGetCoverageReportQueryKey(bindingId) });
+  }, [queryClient, bindingId]);
+
+  // Nothing applies to this table (the common case for tables outside any
+  // policy scope) — stay out of the way entirely.
+  if (reportQuery.isLoading || evaluations.length === 0) return null;
+
+  const blockingGaps = (report?.blocking_unsatisfied ?? []).length;
+  const advisoryGaps = evaluations.filter(
+    (e) => !e.satisfied && !(e.waived ?? false) && e.enforcement === "advisory",
+  ).length;
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2">
+        <ShieldCheck className="h-4 w-4" />
+        <h2 className="text-sm font-semibold">Coverage compliance</h2>
+        {blockingGaps > 0 ? (
+          <Badge variant="outline" className="gap-1 text-destructive border-destructive/40">
+            <XCircle className="h-3 w-3" /> {blockingGaps} blocking gap{blockingGaps === 1 ? "" : "s"}
+          </Badge>
+        ) : (
+          <Badge variant="outline" className="gap-1 text-emerald-600 border-emerald-300">
+            <CheckCircle2 className="h-3 w-3" /> Approval-ready
+          </Badge>
+        )}
+        {advisoryGaps > 0 && (
+          <Badge variant="outline" className="gap-1 text-amber-600 border-amber-300">
+            <AlertTriangle className="h-3 w-3" /> {advisoryGaps} advisory
+          </Badge>
+        )}
+      </div>
+      {report?.primary_key_unknown && (
+        <p className="text-xs text-amber-600">
+          Primary-key columns could not be resolved from Unity Catalog — primary-key-only policies may be inaccurate.
+        </p>
+      )}
+      <div className="rounded-md border">
+        {evaluations.map((e) => {
+          const checks = e.required_checks && e.required_checks.length > 0 ? e.required_checks : [e.required_check];
+          return (
+            <CoverageEvaluationRow
+              key={e.policy_id}
+              bindingId={bindingId}
+              evaluation={e}
+              ruleName={checks.map((id) => ruleNameById.get(id) ?? id).join(", ")}
+              isAdmin={perms.isAdmin}
+              onChanged={invalidate}
+            />
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function AboutTab({
   table,
+  bindingId,
   onColumnClick,
 }: {
   table: MonitoredTableOut;
+  bindingId: string;
   /** Deep-links to the Apply Rules "by column" lens, expanded to that
    *  column (item 1) — reuses the jump+expand handoff already wired
    *  between the by-rule/by-column lenses in ApplyRulesTab. */
@@ -1627,6 +1879,8 @@ function AboutTab({
           </div>
         </section>
       </div>
+
+      <CoverageComplianceCard bindingId={bindingId} />
 
       {/* View Data (P26 item 3) — relocated from its own tab into the About
           tab, below the About/Schema row where the schema section used to
@@ -2294,6 +2548,95 @@ function ApplyRulesTab({
     return m;
   }, [publishedRules]);
 
+  // Coverage policies (admin-defined) declare that certain columns MUST carry a
+  // specific registry rule. Fold the unsatisfied requirements into the Suggest
+  // dialog: every missing (rule, column) is turned into a first-class suggestion
+  // so the required rules are always offered (even when the AI/tag suggesters
+  // return nothing), and flagged so the dialog can highlight them.
+  const coverageReportQuery = useGetCoverageReport(bindingId);
+  const coverageRequired = useMemo(() => {
+    const evals = coverageReportQuery.data?.data?.evaluations ?? [];
+    const suggestions: SuggestedRuleMappingOut[] = [];
+    const requiredKeys = new Set<string>();
+    const policyByKey = new Map<string, string>();
+    const add = (s: SuggestedRuleMappingOut, policyName: string) => {
+      const k = suggestionKey(s);
+      suggestions.push(s);
+      requiredKeys.add(k);
+      policyByKey.set(k, policyName);
+    };
+    for (const e of evals) {
+      if (e.satisfied || (e.waived ?? false)) continue;
+      const missing = e.missing_columns ?? [];
+      // A policy can require SEVERAL rules; suggest each one it names. A column
+      // in `missing_columns` is short at least one of them — over-suggesting a
+      // rule the column already carries is harmless (filterAlreadyApplied drops
+      // (rule, column) pairs that are already staged/applied).
+      const checks = e.required_checks && e.required_checks.length > 0 ? e.required_checks : [e.required_check];
+      for (const check of checks) {
+        // A check may be a raw DQX function name (legacy policies) rather than a
+        // registry rule_id — those can't be staged/applied here, so skip.
+        const rule = check ? ruleById.get(check) : undefined;
+        if (!rule) continue;
+        const meta = (rule.user_metadata ?? {}) as Record<string, unknown>;
+        const ruleName =
+          typeof meta.name === "string" && meta.name.trim() ? meta.name.trim() : rule.rule_id;
+        const slots = rule.definition?.slots ?? [];
+        if (slots.length === 1) {
+          const slotName = slots[0].name;
+          for (const col of missing) {
+            add(
+              {
+                rule_id: rule.rule_id,
+                rule_name: ruleName,
+                column_mapping: { [slotName]: col },
+                explanation: t("monitoredTables.suggestRulesRequiredByPolicy", { policy: e.name }),
+              },
+              e.name,
+            );
+          }
+        } else if (slots.length === 0) {
+          // Whole-table rule — one column-less suggestion for the policy.
+          add(
+            {
+              rule_id: rule.rule_id,
+              rule_name: ruleName,
+              column_mapping: {},
+              explanation: t("monitoredTables.suggestRulesRequiredByPolicy", { policy: e.name }),
+            },
+            e.name,
+          );
+        }
+        // Multi-slot rules are left out: a per-column auto-mapping would be
+        // ambiguous. The coverage-compliance panel still surfaces the gap.
+      }
+    }
+    return { suggestions, requiredKeys, policyByKey };
+  }, [coverageReportQuery.data, ruleById, t]);
+
+  // Merge the coverage-required suggestions into whatever the AI/tag suggesters
+  // produced (union, deduped by suggestionKey). Coverage requirements make the
+  // dialog "available" and non-loading on their own, so the required rules show
+  // even when the AI backend is unavailable or still in flight.
+  const effectiveSuggestState = useMemo<SuggestRulesState | null>(() => {
+    if (coverageRequired.suggestions.length === 0) return suggestState;
+    const baseSuggestions = suggestState?.suggestions ?? [];
+    const seen = new Set(baseSuggestions.map(suggestionKey));
+    const merged = [...baseSuggestions];
+    for (const s of coverageRequired.suggestions) {
+      const k = suggestionKey(s);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      merged.push(s);
+    }
+    return { available: true, reason: suggestState?.reason, suggestions: merged };
+  }, [suggestState, coverageRequired]);
+  const effectiveSuggestLoading = suggestLoading && coverageRequired.suggestions.length === 0;
+  // Show the Suggest affordance when the AI backend is available OR when there
+  // are coverage-required rules to offer (so admins' mandatory rules surface
+  // even in workspaces with no AI configured).
+  const suggestReachable = aiAvailability.available || coverageRequired.suggestions.length > 0;
+
   // Admin default threshold — used as the bottom of the precedence chain
   // (rule_override ?? registry_default ?? admin_default) for the ThresholdPill
   // placeholder. A non-admin user won't have write access to this setting but
@@ -2693,19 +3036,19 @@ function ApplyRulesTab({
           {/* Divider between the always-visible lens toggle and the
               edit-only actions — mirrors dqlake's AppliedRulesList toolbar.
               Only shown alongside the Suggest button so it never dangles. */}
-          {canEdit && aiAvailability.available && <div className="h-5 w-px bg-border mx-1" />}
+          {canEdit && suggestReachable && <div className="h-5 w-px bg-border mx-1" />}
           {canEdit && (
             <>
-              {aiAvailability.available && (
+              {suggestReachable && (
                 <Button
                   size="sm"
                   className={`gap-2 ${AI_BUTTON_BG}`}
                   onClick={() => {
-                    // Table unreachable: the prefetch was skipped on purpose (see
-                    // `canSuggest` above) and a network retry would only fail the
-                    // same way, so open straight to the honest unavailable state
-                    // instead of a dialog stuck on "Finding good matches…".
-                    if (!canSuggest) {
+                    // Table unreachable: a network retry would fail the same way.
+                    // Coverage-required suggestions don't need the table read, so
+                    // only short-circuit to the unavailable state when there are
+                    // none to show; otherwise fall through and open the dialog.
+                    if (!canSuggest && coverageRequired.suggestions.length === 0) {
                       setSuggestState({
                         available: false,
                         reason: t("monitoredTables.suggestRulesTableUnavailableReason"),
@@ -2715,9 +3058,15 @@ function ApplyRulesTab({
                       return;
                     }
                     // Usually already prefetched on tab entry — just open. Re-fire
-                    // only when there's nothing usable yet (prefetch skipped or
-                    // came back unavailable); an in-flight prefetch is left alone.
-                    if (!suggestPending && (suggestState === null || !suggestState.available)) {
+                    // only when the AI backend is usable and there's nothing yet
+                    // (prefetch skipped or came back unavailable); an in-flight
+                    // prefetch is left alone.
+                    if (
+                      aiAvailability.available &&
+                      canSuggest &&
+                      !suggestPending &&
+                      (suggestState === null || !suggestState.available)
+                    ) {
                       runSuggest();
                     }
                     setSuggestOpen(true);
@@ -2897,10 +3246,12 @@ function ApplyRulesTab({
         onOpenChange={setSuggestOpen}
         bindingId={bindingId}
         labelDefinitions={labelDefinitions}
-        state={suggestState}
-        loading={suggestLoading}
+        state={effectiveSuggestState}
+        loading={effectiveSuggestLoading}
         onRefresh={runSuggest}
         appliedRules={stagedRows}
+        requiredKeys={coverageRequired.requiredKeys}
+        requiredPolicyByKey={coverageRequired.policyByKey}
         onAdd={stageNewRows}
         onApplied={() => {}}
       />

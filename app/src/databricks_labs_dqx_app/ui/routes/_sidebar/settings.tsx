@@ -69,11 +69,19 @@ import {
   useGetWarehouseAccess,
   getGetWarehouseAccessQueryKey,
   useGrantWarehouseAccess,
+  useGetCoveragePolicies,
+  useSaveCoveragePolicies,
+  getGetCoveragePoliciesQueryKey,
+  useListRegistryRules,
+  CoveragePolicyEnforcement,
+  CoveragePolicyColumnType,
   type AiSettingsIn,
   type RulesRegistrySettingsIn,
   type ComputeSettingsIn,
   type JobsComputeModel,
   type WarehouseOut,
+  type CoveragePolicy,
+  type RegistryRuleOut,
 } from "@/lib/api";
 import {
   Select,
@@ -1242,6 +1250,473 @@ function normaliseReviewStatusDefaults(statuses: RunReviewStatusOption[]): RunRe
   const existingDefaultIdx = statuses.findIndex((s) => s.is_default);
   const defaultIdx = pendingIdx >= 0 ? pendingIdx : existingDefaultIdx >= 0 ? existingDefaultIdx : 0;
   return statuses.map((s, i) => ({ ...s, is_default: i === defaultIdx }));
+}
+
+// Map a coverage column-type selector to the registry-rule slot "family" a
+// rule's column slot must accept to be relevant for that type. A rule whose
+// column slot is polymorphic ("any") always applies; a family-specific slot
+// (temporal / numeric / text / boolean) is only offered for the matching
+// column type.
+const COVERAGE_TYPE_TO_FAMILY: Partial<Record<CoveragePolicy["column_type"], string>> = {
+  timestamp: "temporal",
+  timestamp_ntz: "temporal",
+  date: "temporal",
+  decimal: "numeric",
+  numeric: "numeric",
+  boolean: "boolean",
+  string: "text",
+};
+
+// The column-slot family a registry rule implies, or ``null`` when the rule has
+// no column slot (nothing per-column coverage can bind to). A rule with any
+// specific-family column slot takes that family; otherwise it's polymorphic
+// ("any").
+function coverageRuleFamily(rule: RegistryRuleOut): string | null {
+  const slots = rule.definition?.slots ?? [];
+  if (slots.length === 0) return null;
+  const specific = slots.find((s) => s.family && s.family !== "any");
+  return specific?.family ?? "any";
+}
+
+// Whether a registry rule should be offered for a given coverage column type.
+function coverageRuleMatchesColumnType(rule: RegistryRuleOut, columnType: CoveragePolicy["column_type"]): boolean {
+  const family = coverageRuleFamily(rule);
+  if (family === null) return false;
+  if (columnType === "any") return true;
+  if (family === "any") return true;
+  return family === COVERAGE_TYPE_TO_FAMILY[columnType];
+}
+
+// Human label for a registry rule in the required-rule dropdown: its authored
+// name (from user_metadata) with the underlying check function as a hint, else
+// the rule id.
+function coverageRuleLabel(rule: RegistryRuleOut): string {
+  const meta = (rule.user_metadata ?? {}) as Record<string, unknown>;
+  const name = typeof meta.name === "string" && meta.name.trim() ? meta.name.trim() : "";
+  const fn = typeof rule.definition?.body?.function === "string" ? (rule.definition.body.function as string) : "";
+  if (name && fn) return `${name} (${fn})`;
+  if (name) return name;
+  if (fn) return fn;
+  return rule.rule_id;
+}
+
+const COVERAGE_COLUMN_TYPE_OPTIONS: { value: CoveragePolicy["column_type"]; label: string }[] = [
+  { value: "timestamp", label: "timestamp" },
+  { value: "timestamp_ntz", label: "timestamp_ntz" },
+  { value: "date", label: "date" },
+  { value: "decimal", label: "decimal" },
+  { value: "numeric", label: "numeric" },
+  { value: "boolean", label: "boolean" },
+  { value: "string", label: "string" },
+  { value: "any", label: "Any type" },
+];
+
+function newCoveragePolicy(): CoveragePolicy {
+  return {
+    policy_id: "",
+    name: "",
+    description: "",
+    enabled: true,
+    enforcement: CoveragePolicyEnforcement.advisory,
+    table_scope: "",
+    table_scopes: [],
+    column_type: CoveragePolicyColumnType.timestamp,
+    primary_key_only: false,
+    required_check: "",
+    required_checks: [],
+  };
+}
+
+// The rules a policy requires, tolerant of the legacy single-value form so an
+// API-set / older policy still renders. Prefers the list; falls back to the
+// deprecated ``required_check``.
+function policyRequiredChecks(p: CoveragePolicy): string[] {
+  if (p.required_checks && p.required_checks.length > 0) return p.required_checks;
+  return p.required_check ? [p.required_check] : [];
+}
+
+// The scopes a policy applies to, tolerant of the legacy single-value form so
+// an API-set / older policy still renders. Prefers the list; falls back to the
+// deprecated ``table_scope``.
+function policyScopes(p: CoveragePolicy): string[] {
+  if (p.table_scopes && p.table_scopes.length > 0) return p.table_scopes;
+  return p.table_scope ? [p.table_scope] : [];
+}
+
+// Free-text multi-scope editor: a table matches the policy when it matches ANY
+// chip (OR). Kept as its own component so each policy row can hold its own
+// pending-input state without the parent re-rendering every keystroke.
+function TableScopesEditor({
+  scopes,
+  isAdmin,
+  onAdd,
+  onRemove,
+}: {
+  scopes: string[];
+  isAdmin: boolean;
+  onAdd: (value: string) => void;
+  onRemove: (value: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [value, setValue] = useState("");
+  const commit = () => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    onAdd(trimmed);
+    setValue("");
+  };
+  return (
+    <div className="space-y-1.5">
+      <Label className="text-xs text-muted-foreground">{t("config.coveragePolicyScopesLabel")}</Label>
+      <p className="text-[11px] text-muted-foreground/70">{t("config.coveragePolicyScopeHint")}</p>
+      {scopes.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {scopes.map((scope) => (
+            <span
+              key={scope}
+              className="inline-flex items-center gap-1 rounded border bg-muted/40 px-2 py-1 font-mono text-xs"
+            >
+              <span className="truncate max-w-[240px]">{scope}</span>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => onRemove(scope)}
+                  className="rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                  aria-label={t("config.coveragePolicyRemoveScopeAria", { scope })}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs italic text-muted-foreground">{t("config.coveragePolicyNoScopes")}</p>
+      )}
+      {isAdmin && (
+        <div className="flex gap-1.5">
+          <Input
+            value={value}
+            placeholder="main.finance.*"
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commit();
+              }
+            }}
+            className="w-full sm:w-[320px]"
+          />
+          <Button type="button" variant="outline" onClick={commit} disabled={!value.trim()}>
+            {t("config.coveragePolicyAddScope")}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CoveragePoliciesCard() {
+  const { t } = useTranslation();
+  const { data, isLoading } = useGetCoveragePolicies();
+  // Only approved registry rules can be materialized/enforced, so those are the
+  // only ones a coverage policy can meaningfully require.
+  const { data: registryRules } = useListRegistryRules({ status: "approved" });
+  const queryClient = useQueryClient();
+  const saveMutation = useSaveCoveragePolicies();
+  const { data: role } = useCurrentUserRoleSuspense();
+  const isAdmin = role?.data?.role === "admin";
+
+  const [draft, setDraft] = useState<CoveragePolicy[]>([]);
+  const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
+    if (data && !hydrated) {
+      setDraft(data.data.policies.map((p) => ({ ...p })));
+      setHydrated(true);
+    }
+  }, [data, hydrated]);
+
+  // Approved registry rules that bind to a column (have a column slot), sorted
+  // by name — the pool the required-rule dropdown draws from, narrowed per
+  // policy by the selected column type.
+  const columnRules = useMemo(() => {
+    const rules = (registryRules?.data ?? []).filter((r) => coverageRuleFamily(r) !== null);
+    return [...rules].sort((a, b) => coverageRuleLabel(a).localeCompare(coverageRuleLabel(b)));
+  }, [registryRules]);
+
+  // Required-rule options for a given column type (value = rule_id).
+  const ruleOptionsForType = useCallback(
+    (columnType: CoveragePolicy["column_type"]): { value: string; label: string }[] =>
+      columnRules
+        .filter((r) => coverageRuleMatchesColumnType(r, columnType))
+        .map((r) => ({ value: r.rule_id, label: coverageRuleLabel(r) })),
+    [columnRules],
+  );
+
+  // rule_id -> label, so a stored required_check renders as the rule's name.
+  const ruleLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const r of registryRules?.data ?? []) map.set(r.rule_id, coverageRuleLabel(r));
+    return map;
+  }, [registryRules]);
+
+  const update = (idx: number, patch: Partial<CoveragePolicy>) => {
+    setDraft((prev) =>
+      prev.map((p, i) => {
+        if (i !== idx) return p;
+        const next = { ...p, ...patch };
+        // When the column type changes, drop any required rules that no longer
+        // apply to the new type so the form never keeps an incompatible rule.
+        if (patch.column_type !== undefined && patch.required_checks === undefined) {
+          const valid = new Set(ruleOptionsForType(next.column_type).map((o) => o.value));
+          const kept = policyRequiredChecks(next).filter((c) => valid.has(c));
+          next.required_checks = kept;
+          next.required_check = kept[0] ?? "";
+        }
+        return next;
+      }),
+    );
+  };
+  // Persist edits to a policy's required-rule list, keeping ``required_check``
+  // in sync (first entry) for the deprecated single-value consumers.
+  const setChecks = (idx: number, checks: string[]) =>
+    update(idx, { required_checks: checks, required_check: checks[0] ?? "" });
+  const addCheck = (idx: number, ruleId: string) => {
+    const current = policyRequiredChecks(draft[idx]);
+    if (!current.includes(ruleId)) setChecks(idx, [...current, ruleId]);
+  };
+  const removeCheck = (idx: number, ruleId: string) =>
+    setChecks(idx, policyRequiredChecks(draft[idx]).filter((c) => c !== ruleId));
+  // Persist edits to a policy's scope list, keeping the deprecated singular
+  // ``table_scope`` in sync (first entry) for older consumers.
+  const setScopes = (idx: number, scopes: string[]) =>
+    update(idx, { table_scopes: scopes, table_scope: scopes[0] ?? "" });
+  const addScope = (idx: number, value: string) => {
+    const current = policyScopes(draft[idx]);
+    if (!current.includes(value)) setScopes(idx, [...current, value]);
+  };
+  const removeScope = (idx: number, value: string) =>
+    setScopes(idx, policyScopes(draft[idx]).filter((s) => s !== value));
+  const addPolicy = () => setDraft((prev) => [...prev, newCoveragePolicy()]);
+  const removePolicy = (idx: number) => setDraft((prev) => prev.filter((_, i) => i !== idx));
+
+  const handleSave = () => {
+    saveMutation.mutate(
+      { data: { policies: draft } },
+      {
+        onSuccess: (resp) => {
+          queryClient.invalidateQueries({ queryKey: getGetCoveragePoliciesQueryKey() });
+          setDraft(resp.data.policies.map((p) => ({ ...p })));
+          toast.success(t("config.coveragePoliciesSaved"));
+        },
+        onError: (err: unknown) => {
+          const axErr = err as AxiosError<{ detail?: string }>;
+          toast.error(axErr?.response?.data?.detail ?? t("config.coveragePoliciesFailedSave"));
+        },
+      },
+    );
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4" />
+          {t("config.coveragePoliciesTitle")}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm text-muted-foreground">{t("config.coveragePoliciesHint")}</p>
+
+        {isLoading ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> {t("common.loading")}
+          </div>
+        ) : draft.length === 0 ? (
+          <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
+            {t("config.coveragePoliciesEmpty")}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {draft.map((policy, idx) => (
+              <div key={policy.policy_id || `new-${idx}`} className="rounded-md border p-4 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1 space-y-1">
+                    <Label className="text-xs text-muted-foreground">Name</Label>
+                    <Input
+                      value={policy.name}
+                      disabled={!isAdmin}
+                      placeholder="e.g. Finance timestamps must be not-null"
+                      onChange={(e) => update(idx, { name: e.target.value })}
+                    />
+                  </div>
+                  <div className="flex items-center gap-3 pt-5">
+                    <div className="flex items-center gap-1.5">
+                      <Switch
+                        checked={policy.enabled ?? true}
+                        disabled={!isAdmin}
+                        onCheckedChange={(v) => update(idx, { enabled: v })}
+                        aria-label="Enabled"
+                      />
+                      <span className="text-xs text-muted-foreground">Enabled</span>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      disabled={!isAdmin}
+                      onClick={() => removePolicy(idx)}
+                      aria-label="Remove policy"
+                    >
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </div>
+                </div>
+
+                <TableScopesEditor
+                  scopes={policyScopes(policy)}
+                  isAdmin={isAdmin}
+                  onAdd={(value) => addScope(idx, value)}
+                  onRemove={(value) => removeScope(idx, value)}
+                />
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs text-muted-foreground">Column type</Label>
+                    <Select
+                      value={policy.column_type}
+                      disabled={!isAdmin}
+                      onValueChange={(v) => update(idx, { column_type: v as CoveragePolicy["column_type"] })}
+                    >
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {COVERAGE_COLUMN_TYPE_OPTIONS.map((o) => (
+                          <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs text-muted-foreground">Enforcement</Label>
+                    <Select
+                      value={policy.enforcement ?? "advisory"}
+                      disabled={!isAdmin}
+                      onValueChange={(v) => update(idx, { enforcement: v as CoveragePolicy["enforcement"] })}
+                    >
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={CoveragePolicyEnforcement.advisory}>Advisory — surface only</SelectItem>
+                        <SelectItem value={CoveragePolicyEnforcement.blocking}>Blocking — gate approval</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                {(() => {
+                  const selected = policyRequiredChecks(policy);
+                  const selectedSet = new Set(selected);
+                  const addable = ruleOptionsForType(policy.column_type).filter(
+                    (o) => !selectedSet.has(o.value),
+                  );
+                  return (
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-muted-foreground">Required rules</Label>
+                      <p className="text-[11px] text-muted-foreground/70">
+                        Every matching column must carry all of these rules.
+                      </p>
+                      {selected.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {selected.map((ruleId) => (
+                            <span
+                              key={ruleId}
+                              className="inline-flex items-center gap-1 rounded border bg-muted/40 px-2 py-1 text-xs"
+                            >
+                              <span className="truncate max-w-[240px]">
+                                {ruleLabelById.get(ruleId) ?? ruleId}
+                              </span>
+                              {isAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => removeCheck(idx, ruleId)}
+                                  className="rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                                  aria-label={`Remove ${ruleLabelById.get(ruleId) ?? ruleId}`}
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              )}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-xs italic text-muted-foreground">No rules added yet.</p>
+                      )}
+                      {isAdmin && (
+                        <Select value="" onValueChange={(v) => addCheck(idx, v)}>
+                          <SelectTrigger className="w-full sm:w-[320px]">
+                            <SelectValue placeholder="Add a rule…" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {addable.map((o) => (
+                              <SelectItem key={o.value} value={o.value}>
+                                {o.label}
+                              </SelectItem>
+                            ))}
+                            {addable.length === 0 && (
+                              <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                                {selected.length > 0
+                                  ? "All matching rules added."
+                                  : "No approved registry rules for this column type."}
+                              </div>
+                            )}
+                          </SelectContent>
+                        </Select>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id={`pk-${idx}`}
+                    checked={policy.primary_key_only ?? false}
+                    disabled={!isAdmin}
+                    onCheckedChange={(v) => update(idx, { primary_key_only: v === true })}
+                  />
+                  <Label htmlFor={`pk-${idx}`} className="text-sm font-normal">
+                    Only primary-key columns
+                  </Label>
+                </div>
+
+                <div className="space-y-1">
+                  <Label className="text-xs text-muted-foreground">Description (optional)</Label>
+                  <Textarea
+                    value={policy.description ?? ""}
+                    disabled={!isAdmin}
+                    rows={2}
+                    onChange={(e) => update(idx, { description: e.target.value })}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {isAdmin ? (
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={addPolicy}>
+              <Plus className="h-4 w-4" /> {t("config.coveragePolicyAdd")}
+            </Button>
+            <Button size="sm" onClick={handleSave} disabled={saveMutation.isPending}>
+              {saveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {t("common.save")}
+            </Button>
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">{t("config.coveragePoliciesAdminOnlyHint")}</p>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function RunReviewStatusesSettings() {
@@ -2613,6 +3088,7 @@ function ConfigPage() {
       { id: "approvalsMode", tab: "governance", title: t("config.approvalsModeTitle"), keywords: t("config.kwApprovalsMode"), render: () => <ApprovalsModeCard /> },
       { id: "requireDraftRun", tab: "governance", title: t("config.requireDraftRunTitle"), keywords: t("config.kwRequireDraftRun"), render: () => <RequireDraftRunSettingsCard /> },
       { id: "shareTablesWithUsers", tab: "governance", title: t("config.shareTablesWithUsersTitle"), keywords: t("config.kwShareTablesWithUsers"), render: () => <ShareTablesWithWorkspaceUsersCard /> },
+      { id: "coveragePolicies", tab: "governance", title: t("config.coveragePoliciesTitle"), keywords: t("config.kwCoveragePolicies"), render: () => <CoveragePoliciesCard /> },
       { id: "retention", tab: "governance", title: t("config.retentionTitle"), keywords: t("config.kwRetention"), render: () => <RetentionSettings /> },
       { id: "entitlements", tab: "entitlements", title: t("roleManagement.title"), keywords: t("config.kwEntitlements"), render: () => <RoleManagement /> },
       { id: "compute", tab: "compute", title: t("config.computeTitle"), keywords: t("config.kwCompute"), render: () => <ComputeSettingsCard /> },

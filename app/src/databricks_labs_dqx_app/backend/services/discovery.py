@@ -93,6 +93,51 @@ def read_column_tags(sql: "SqlExecutor", table_fqn: str) -> dict[str, list[str]]
     return tags
 
 
+def read_primary_key_columns(sql: "SqlExecutor", table_fqn: str) -> set[str]:
+    """Return the set of PRIMARY KEY column names for *table_fqn*, or ``set()``.
+
+    Sources the constraint from ``<catalog>.information_schema`` by joining
+    ``key_column_usage`` to ``table_constraints`` on the constraint identity and
+    filtering ``constraint_type = 'PRIMARY KEY'``. Unity Catalog exposes
+    informational (non-enforced) PK constraints there when a table declares one.
+
+    Best-effort: validates *table_fqn*, backtick-quotes the catalog, escapes the
+    schema/table string literals, and gates the query with
+    :func:`is_sql_query_safe`. Any failure (no declared PK, permission denied,
+    transient error) yields an empty set. Never raises — callers treat "unknown"
+    and "no PK" identically at the set level, but can distinguish them via a
+    separate signal if needed.
+    """
+    from databricks.labs.dqx.utils import is_sql_query_safe
+
+    from ..sql_utils import escape_sql_string, quote_ident, validate_fqn
+
+    try:
+        validate_fqn(table_fqn)
+        catalog, schema, table = table_fqn.split(".")
+        cat = quote_ident(catalog)
+        query = (
+            "SELECT kcu.column_name "
+            f"FROM {cat}.information_schema.key_column_usage kcu "
+            f"JOIN {cat}.information_schema.table_constraints tc "
+            "  ON kcu.constraint_catalog = tc.constraint_catalog "
+            " AND kcu.constraint_schema = tc.constraint_schema "
+            " AND kcu.constraint_name = tc.constraint_name "
+            "WHERE tc.constraint_type = 'PRIMARY KEY' "
+            f"  AND kcu.table_schema = '{escape_sql_string(schema)}' "
+            f"  AND kcu.table_name = '{escape_sql_string(table)}'"
+        )
+        if not is_sql_query_safe(query):
+            logger.warning("Skipping unsafe primary-key query for %s", table_fqn)
+            return set()
+        rows = sql.query(query)
+    except Exception:
+        logger.warning("Failed to read primary-key columns for %s", table_fqn)
+        return set()
+
+    return {str(row[0]) for row in rows if row and row[0]}
+
+
 class DiscoveryService:
     """OBO-scoped Unity Catalog browsing with per-user response caching."""
 
@@ -145,6 +190,17 @@ class DiscoveryService:
             )
             for col in table_info.columns
         ]
+
+    def get_primary_key_columns(self, table_fqn: str) -> set[str]:
+        """Return the PRIMARY KEY column names for *table_fqn* (best-effort).
+
+        Delegates to :func:`read_primary_key_columns` over the injected SQL
+        executor. Returns an empty set when no SQL executor is available or the
+        table declares no informational PK constraint. Never raises.
+        """
+        if self._sql is None:
+            return set()
+        return read_primary_key_columns(self._sql, table_fqn)
 
     def get_table_schema_ddl(self, table_fqn: str) -> str:
         """Return the Spark DDL string for a UC table, ordered by column position.

@@ -393,6 +393,7 @@ class TestMonitoredTableSubmitWiring:
             role=UserRole.RULE_APPROVER,
             principal_ids=frozenset({"me"}),
             obo_ws=_mock_obo_ws("alice@x"),
+            coverage_svc=MagicMock(),
         )
         return version_svc, rules_catalog
 

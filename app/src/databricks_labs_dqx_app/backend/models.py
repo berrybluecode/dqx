@@ -2178,6 +2178,15 @@ class GroupRowOut(BaseModel):
     is keyed on, so the UI can facet-filter by rule IDENTITY across
     renames; None for legacy/untagged name-keyed groups and on every
     other axis).
+
+    *pass_threshold* is the pass-rate threshold (%) that was actually
+    applied to THIS run's rows when verdicting the breach — the value
+    frozen into the run's ``checks_json`` at materialization time, falling
+    back to the live resolver chain for legacy runs. It lets the drilldown
+    show "the threshold this rule was judged against for this run". None
+    when the group's rows were judged against DIFFERENT thresholds (e.g. a
+    rule with divergent per-column overrides — the UI renders "Mixed") or
+    when breach evaluation is off (no resolver supplied).
     """
 
     label: str | None = None
@@ -2190,6 +2199,7 @@ class GroupRowOut(BaseModel):
     total_tests: int | None = None
     breached: bool = False
     breach_criticality: str | None = None
+    pass_threshold: int | None = None
 
 
 class TrendPointOut(BaseModel):

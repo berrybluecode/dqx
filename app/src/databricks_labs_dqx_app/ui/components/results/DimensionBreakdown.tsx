@@ -82,6 +82,10 @@ export type BreakdownRow = {
   /** Criticality of the breach (worst child): "error" | "warn" | null.
    *  Accepts the raw API string; BreachIcon renders nothing for non-"error"/"warn" values. */
   breach_criticality?: string | null;
+  /** Per-run pass threshold (%) this group was verdicted against, frozen at
+   *  run time. Shown only when the box opts in via `showThreshold`. null means
+   *  the group's checks used divergent thresholds (rendered as "Mixed"). */
+  pass_threshold?: number | null;
 };
 
 type SortKey =
@@ -134,6 +138,7 @@ export function DimensionBreakdown({
   rowLink,
   renderLabel,
   breachEnabled = true,
+  showThreshold = false,
 }: {
   title: string;
   rows: Array<BreakdownRow>;
@@ -189,6 +194,10 @@ export function DimensionBreakdown({
   /** When false, breach warning icons are hidden (pass-threshold feature is
    *  disabled globally). Defaults to true (fail-open). */
   breachEnabled?: boolean;
+  /** When true, an extra "Threshold" column shows each row's per-run pass
+   *  threshold (`pass_threshold`). Opt-in — only the By rule box uses it, so
+   *  every other axis keeps its 5-column layout. Defaults to false. */
+  showThreshold?: boolean;
 }) {
   const { t } = useTranslation();
   const [sort, setSort] = useState<SortState>(null);
@@ -298,6 +307,7 @@ export function DimensionBreakdown({
               <col style={{ width: "88px" }} />
               <col style={{ width: "88px" }} />
               <col style={{ width: "88px" }} />
+              {showThreshold && <col style={{ width: "96px" }} />}
               <col style={{ width: "88px" }} />
             </colgroup>
             <thead className="bg-muted/30 border-b">
@@ -308,6 +318,20 @@ export function DimensionBreakdown({
                   : headerCell("rule_count", t("resultsUi.rulesHeader"), "right")}
                 {headerCell("failed_tests", t("resultsUi.failedTestsHeader"), "right")}
                 {headerCell("total_tests", t("resultsUi.totalTestsHeader"), "right")}
+                {showThreshold && (
+                  <th className="text-right whitespace-nowrap px-3 py-2 uppercase tracking-wide text-[10px] text-muted-foreground">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="cursor-help border-b border-dotted border-muted-foreground/50">
+                          {t("resultsUi.thresholdHeader")}
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="max-w-xs">
+                        {t("resultsUi.thresholdHeaderHelp")}
+                      </TooltipContent>
+                    </Tooltip>
+                  </th>
+                )}
                 {headerCell("pass_rate", t("resultsUi.scoreHeader"), "right")}
               </tr>
             </thead>
@@ -372,6 +396,24 @@ export function DimensionBreakdown({
                     <td className="px-3 py-2 text-right tabular-nums">
                       {r.total_tests == null ? "—" : r.total_tests}
                     </td>
+                    {showThreshold && (
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {r.pass_threshold == null ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="cursor-help text-muted-foreground border-b border-dotted border-muted-foreground/50">
+                                {t("resultsUi.thresholdMixed")}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-xs">
+                              {t("resultsUi.thresholdMixedHelp")}
+                            </TooltipContent>
+                          </Tooltip>
+                        ) : (
+                          `${r.pass_threshold}%`
+                        )}
+                      </td>
+                    )}
                     <td className="px-3 py-2 text-right tabular-nums">
                       {r.pass_rate == null
                         ? "—"

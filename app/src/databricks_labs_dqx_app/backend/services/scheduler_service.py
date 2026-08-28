@@ -1669,19 +1669,31 @@ class SchedulerService:
         missed-window contract already allows, and that firing re-anchors
         ``last_run_at`` to now, so this cannot become a retry loop.
 
-        Two cases deliberately keep the stored value: a cron that no longer
-        parses, and a ``failed`` status. Both mean ``next_run_at`` may be a
-        :data:`_FAILURE_BACKOFF` stamp rather than a real occurrence, and
-        replacing a backoff with "next occurrence after the failed run" is
-        exactly the tight retry loop the backoff exists to prevent. A cron
-        edited during a backoff window takes effect when it expires.
+        One case deliberately keeps the stored value: a cron that no longer
+        parses. Its ``next_run_at`` is a :data:`_FAILURE_BACKOFF` stamp rather
+        than a real occurrence, and the ``_compute_next_cron_run`` call below
+        raises for it — the ``except`` returns the stored stamp untouched, so a
+        malformed cron can never have its backoff replaced by "next occurrence
+        after the failed run" (the tight retry loop the backoff exists to
+        prevent). A cron edited during a backoff window takes effect once it
+        parses again.
+
+        A ``failed`` status does NOT skip realignment. When a run *fails to
+        trigger* under a VALID cron, :meth:`_finish_schedule_firing` advances
+        ``next_run_at`` to a real cron occurrence (not a backoff) and stamps
+        ``failed``; if the cron is then edited, that occurrence must realign
+        like any other — otherwise a single failed run freezes the schedule on
+        its old cadence forever, silently ignoring every later edit (the bug
+        that stranded a table schedule after a transient permission error).
+        Realigning a failed tracker cannot loop: the re-derived occurrence is
+        anchored on ``last_run_at`` and firing it re-anchors ``last_run_at`` to
+        now, so at most one catch-up fires per real occurrence — exactly as for
+        a non-failed tracker.
 
         Returns the ``next_run_at`` the caller should evaluate — the stored one
         or, when realigned, the new occurrence.
         """
         status = tracker.get("status")
-        if status == "failed":
-            return next_run
 
         stored_dt = self._parse_ts(next_run) if isinstance(next_run, str) else next_run
         if stored_dt is None or stored_dt <= now:

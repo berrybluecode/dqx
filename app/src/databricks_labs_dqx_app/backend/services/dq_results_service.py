@@ -295,6 +295,11 @@ class _GroupAcc:
     # no resolver is supplied (breach evaluation is off).
     breached: bool = False
     breach_criticality: str | None = None
+    # The DISTINCT effective pass thresholds (%) the resolver applied across
+    # this group's rows. Stays empty when no resolver is supplied. A single
+    # value is the threshold the whole group was judged against; more than
+    # one means divergent per-column/per-rule overrides (surfaced as None).
+    thresholds: set[int] = field(default_factory=set)
 
     def add(self, row: CheckResultRow, resolve: ThresholdResolver | None = None) -> None:
         self.failed += row.failed
@@ -311,10 +316,19 @@ class _GroupAcc:
             score_sum, count = self.rule_check_scores.get(instance, (0.0, 0))
             self.rule_check_scores[instance] = (score_sum + check_score, count + 1)
         if resolve is not None:
-            crit = _breach_criticality(row, resolve(row))
+            threshold = resolve(row)
+            self.thresholds.add(threshold)
+            crit = _breach_criticality(row, threshold)
             if crit is not None:
                 self.breached = True
                 self.breach_criticality = _worse_criticality(self.breach_criticality, crit)
+
+    @property
+    def pass_threshold(self) -> int | None:
+        # A single applied threshold is the value the whole group was
+        # verdicted against; divergent overrides (or "no resolver") stay
+        # None so the UI can render "Mixed"/"—" instead of a misleading pick.
+        return next(iter(self.thresholds)) if len(self.thresholds) == 1 else None
 
     @property
     def pass_rate(self) -> float | None:
@@ -347,6 +361,7 @@ def _group_rows(
             total_tests=acc.total,
             breached=acc.breached,
             breach_criticality=acc.breach_criticality,
+            pass_threshold=acc.pass_threshold,
         )
         for label, acc in groups.items()
     ]

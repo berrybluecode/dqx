@@ -1,0 +1,371 @@
+# ODCS v3.x data contract for the Databricks `samples.bakehouse` schema.
+#
+# Every schema's `physicalName` is a full 3-part Unity Catalog FQN, so the
+# Bulk Contract Import flow resolves each table directly (no target
+# catalog/schema needed). Column-level constraints below drive DQX rule
+# generation:
+#   - required: true        -> is_not_null(column)
+#   - unique: true          -> is_unique(columns=[column])
+#   - logicalTypeOptions.pattern    -> regex_match
+#   - logicalTypeOptions.minimum/maximum -> is_in_range / is_aggr_* / sql_expression
+#   - logicalTypeOptions.minLength/maxLength -> LENGTH(...) sql_expression
+#   - logicalType date/timestamp + format   -> is_valid_date / is_valid_timestamp
+#   - quality[].type=custom, engine=dqx     -> explicit check verbatim
+# Plus one dataset-level `has_valid_schema` rule per schema (from physicalType).
+
+kind: DataContract
+apiVersion: v3.0.2
+id: urn:datacontract:samples:bakehouse
+name: Bakehouse Sales Data Quality Contract
+version: 1.0.0
+status: active
+domain: retail
+dataProduct: bakehouse_sales
+tenant: Bakehouse Analytics
+
+description:
+  purpose: |
+    Data quality expectations for the Databricks `samples.bakehouse`
+    sales dataset (customers, transactions, franchises, suppliers).
+  usage: Demo contract for DQX rule generation + bulk contract import.
+  limitations: Sample data — thresholds are illustrative, not production SLAs.
+
+tags:
+  - bakehouse
+  - samples
+  - demo
+
+support:
+  - channel: email
+    url: mailto:data-quality@example.com
+
+schema:
+  # ------------------------------------------------------------------
+  # samples.bakehouse.sales_customers
+  # ------------------------------------------------------------------
+  - name: sales_customers
+    physicalName: samples.bakehouse.sales_customers
+    physicalType: table
+    description: Bakehouse loyalty customers.
+    properties:
+      - name: customerID
+        logicalType: integer
+        physicalType: BIGINT
+        description: Unique customer identifier.
+        required: true
+        unique: true
+        primaryKey: true
+      - name: first_name
+        logicalType: string
+        physicalType: STRING
+        description: Customer first name.
+        required: true
+        logicalTypeOptions:
+          minLength: 1
+          maxLength: 100
+      - name: last_name
+        logicalType: string
+        physicalType: STRING
+        description: Customer last name.
+        required: true
+        logicalTypeOptions:
+          minLength: 1
+          maxLength: 100
+      - name: email_address
+        logicalType: string
+        physicalType: STRING
+        description: Customer email.
+        required: true
+        logicalTypeOptions:
+          pattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        quality:
+          - type: custom
+            engine: dqx
+            description: Email must be non-empty and well-formed.
+            implementation:
+              criticality: error
+              name: customer_email_valid
+              check:
+                function: regex_match
+                arguments:
+                  column: email_address
+                  regex: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+      - name: phone_number
+        logicalType: string
+        physicalType: STRING
+        description: Customer phone number.
+        required: false
+      - name: gender
+        logicalType: string
+        physicalType: STRING
+        description: Customer-reported gender.
+        required: false
+      - name: address
+        logicalType: string
+        physicalType: STRING
+        description: Street address.
+        required: false
+      - name: city
+        logicalType: string
+        physicalType: STRING
+        description: City.
+        required: false
+      - name: state
+        logicalType: string
+        physicalType: STRING
+        description: State / region.
+        required: false
+      - name: country
+        logicalType: string
+        physicalType: STRING
+        description: Country.
+        required: true
+      - name: continent
+        logicalType: string
+        physicalType: STRING
+        description: Continent.
+        required: false
+      - name: postal_zip_code
+        logicalType: string
+        physicalType: STRING
+        description: Postal / ZIP code.
+        required: false
+
+  # ------------------------------------------------------------------
+  # samples.bakehouse.sales_transactions
+  # ------------------------------------------------------------------
+  - name: sales_transactions
+    physicalName: samples.bakehouse.sales_transactions
+    physicalType: table
+    description: Point-of-sale transactions.
+    properties:
+      - name: transactionID
+        logicalType: string
+        physicalType: STRING
+        description: Unique transaction identifier.
+        required: true
+        unique: true
+        primaryKey: true
+      - name: customerID
+        logicalType: integer
+        physicalType: BIGINT
+        description: FK to sales_customers.customerID.
+        required: true
+      - name: franchiseID
+        logicalType: integer
+        physicalType: BIGINT
+        description: FK to sales_franchises.franchiseID.
+        required: true
+      - name: dateTime
+        logicalType: timestamp
+        physicalType: TIMESTAMP
+        description: Transaction timestamp.
+        required: true
+        logicalTypeOptions:
+          format: 'yyyy-MM-dd HH:mm:ss'
+      - name: product
+        logicalType: string
+        physicalType: STRING
+        description: Product sold.
+        required: true
+      - name: quantity
+        logicalType: integer
+        physicalType: BIGINT
+        description: Units sold (must be positive).
+        required: true
+        logicalTypeOptions:
+          minimum: 1
+          maximum: 1000
+      - name: unitPrice
+        logicalType: integer
+        physicalType: BIGINT
+        description: Price per unit.
+        required: true
+        logicalTypeOptions:
+          minimum: 0
+          maximum: 1000
+      - name: totalPrice
+        logicalType: integer
+        physicalType: BIGINT
+        description: Total transaction amount.
+        required: true
+        logicalTypeOptions:
+          minimum: 0
+          maximum: 1000000
+      - name: paymentMethod
+        logicalType: string
+        physicalType: STRING
+        description: Payment method used.
+        required: true
+        quality:
+          - type: custom
+            engine: dqx
+            description: Payment method must be one of the accepted values.
+            implementation:
+              criticality: warn
+              name: payment_method_allowed
+              check:
+                function: is_in_list
+                arguments:
+                  column: paymentMethod
+                  allowed:
+                    - visa
+                    - mastercard
+                    - amex
+                    - discover
+    quality:
+      # Dataset-level: table should not be empty.
+      - type: custom
+        engine: dqx
+        description: Transactions table must contain at least one row.
+        implementation:
+          criticality: warn
+          name: transactions_not_empty
+          check:
+            function: is_aggr_not_less_than
+            arguments:
+              column: transactionID
+              limit: 1
+              aggr_type: count
+
+  # ------------------------------------------------------------------
+  # samples.bakehouse.sales_franchises
+  # ------------------------------------------------------------------
+  - name: sales_franchises
+    physicalName: samples.bakehouse.sales_franchises
+    physicalType: table
+    description: Franchise locations.
+    properties:
+      - name: franchiseID
+        logicalType: integer
+        physicalType: BIGINT
+        description: Unique franchise identifier.
+        required: true
+        unique: true
+        primaryKey: true
+      - name: name
+        logicalType: string
+        physicalType: STRING
+        description: Franchise name.
+        required: true
+        logicalTypeOptions:
+          minLength: 1
+          maxLength: 200
+      - name: city
+        logicalType: string
+        physicalType: STRING
+        description: City.
+        required: false
+      - name: district
+        logicalType: string
+        physicalType: STRING
+        description: District.
+        required: false
+      - name: zipcode
+        logicalType: string
+        physicalType: STRING
+        description: ZIP / postal code.
+        required: false
+      - name: country
+        logicalType: string
+        physicalType: STRING
+        description: Country.
+        required: true
+      - name: longitude
+        logicalType: string
+        physicalType: STRING
+        description: Longitude (stored as string in samples).
+        required: false
+      - name: latitude
+        logicalType: string
+        physicalType: STRING
+        description: Latitude (stored as string in samples).
+        required: false
+      - name: size
+        logicalType: string
+        physicalType: STRING
+        description: Franchise size class.
+        required: false
+      - name: supplierID
+        logicalType: integer
+        physicalType: BIGINT
+        description: FK to sales_suppliers.supplierID.
+        required: true
+
+  # ------------------------------------------------------------------
+  # samples.bakehouse.sales_suppliers
+  # ------------------------------------------------------------------
+  - name: sales_suppliers
+    physicalName: samples.bakehouse.sales_suppliers
+    physicalType: table
+    description: Ingredient suppliers.
+    properties:
+      - name: supplierID
+        logicalType: integer
+        physicalType: BIGINT
+        description: Unique supplier identifier.
+        required: true
+        unique: true
+        primaryKey: true
+      - name: name
+        logicalType: string
+        physicalType: STRING
+        description: Supplier name.
+        required: true
+        logicalTypeOptions:
+          minLength: 1
+          maxLength: 200
+      - name: ingredient
+        logicalType: string
+        physicalType: STRING
+        description: Ingredient supplied.
+        required: true
+      - name: continent
+        logicalType: string
+        physicalType: STRING
+        description: Continent.
+        required: false
+      - name: city
+        logicalType: string
+        physicalType: STRING
+        description: City.
+        required: false
+      - name: district
+        logicalType: string
+        physicalType: STRING
+        description: District.
+        required: false
+      - name: size
+        logicalType: string
+        physicalType: STRING
+        description: Supplier size class.
+        required: false
+      - name: longitude
+        logicalType: string
+        physicalType: STRING
+        description: Longitude (stored as string in samples).
+        required: false
+      - name: latitude
+        logicalType: string
+        physicalType: STRING
+        description: Latitude (stored as string in samples).
+        required: false
+      - name: approved
+        logicalType: string
+        physicalType: STRING
+        description: Approval flag (Y/N).
+        required: false
+        quality:
+          - type: custom
+            engine: dqx
+            description: Approval flag must be Y or N.
+            implementation:
+              criticality: warn
+              name: supplier_approved_flag_valid
+              check:
+                function: is_in_list
+                arguments:
+                  column: approved
+                  allowed:
+                    - "Y"
+                    - "N"
